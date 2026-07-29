@@ -1,0 +1,19 @@
+[Unit]
+Description=Fedora Crash Doctor system canary
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/share/fedora-crash-doctor/canary.py
+Restart=always
+RestartSec=5
+Nice=19
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/log/fedora-crash-doctor
+
+[Install]
+WantedBy=multi-user.target

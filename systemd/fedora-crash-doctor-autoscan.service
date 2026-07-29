@@ -1,0 +1,13 @@
+[Unit]
+Description=Fedora Crash Doctor autoscan after an unclean boot
+After=systemd-journald.service local-fs.target
+Wants=systemd-journald.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/share/fedora-crash-doctor/autoscan.py
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

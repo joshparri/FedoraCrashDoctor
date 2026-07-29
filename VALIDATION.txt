@@ -1,0 +1,19 @@
+Fedora Crash Doctor v3 validation
+=================================
+
+Validated in the build environment:
+- Python syntax compilation for all Python modules: PASS
+- Bash syntax for all shell scripts: PASS
+- PolicyKit policy XML parse: PASS
+- Unit tests for PCIe device mapping, perf-message classification,
+  incident timeline proximity, and graphics hypothesis ranking: PASS (4/4)
+- Privileged broker JSON protocol smoke test: PASS
+- Quick collector smoke test in a non-Fedora container: PASS
+
+Not possible in the build environment:
+- Launching the Qt GUI under the user's Fedora 44 KDE session
+- Authenticating through the user's live PolicyKit agent
+- Starting Fedora systemd units, kdump, fwupd, SMART tests or stress tests
+- Building the RPM without Fedora's rpmbuild environment
+
+The direct installer and RPM packaging files are included for Fedora testing.

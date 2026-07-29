@@ -1,0 +1,13 @@
+[Unit]
+Description=Fedora Crash Doctor desktop and KWin heartbeat
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/share/fedora-crash-doctor/desktop_heartbeat.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
