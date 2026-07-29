@@ -394,6 +394,10 @@ class MainWindow(QMainWindow):
 
     def build_timeline_tab(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page)
+        self.timeline_summary = QLabel("Run a scan to build the crash timeline.")
+        self.timeline_summary.setWordWrap(True)
+        self.timeline_summary.setStyleSheet("font-weight: 650;")
+        layout.addWidget(self.timeline_summary)
         self.timeline_table = QTableWidget(0, 4)
         self.timeline_table.setHorizontalHeaderLabels(["Time", "Proximity", "Category", "Event"])
         self.timeline_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
@@ -526,6 +530,10 @@ class MainWindow(QMainWindow):
         page = QWidget(); layout = QVBoxLayout(page)
         buttons = QHBoxLayout(); refresh = QPushButton("Refresh trends"); refresh.clicked.connect(self.refresh_trends)
         buttons.addWidget(refresh); buttons.addStretch(); layout.addLayout(buttons)
+        self.comparison_label = QLabel("Before/after comparison will appear after at least two saved scans.")
+        self.comparison_label.setWordWrap(True)
+        self.comparison_label.setStyleSheet("font-weight: 650;")
+        layout.addWidget(self.comparison_label)
         self.trend_chart = TrendChart(); layout.addWidget(self.trend_chart)
         canary_title = QLabel("Current report: CPU, memory and I/O PSI pressure (avg10)")
         canary_title.setStyleSheet("font-weight: 650;")
@@ -953,6 +961,15 @@ class MainWindow(QMainWindow):
     def populate_timeline(self) -> None:
         items = self.report.get("timeline", []) if self.report else []
         self.timeline_table.setRowCount(len(items))
+        if not items:
+            self.timeline_summary.setText("No timestamped previous-boot events were found. Enable evidence capture before the next crash.")
+        else:
+            immediate = sum(1 for item in items if item.get("proximity") == "Immediately before crash")
+            boundary = next((item for item in reversed(items) if item.get("category") == "Crash boundary"), items[-1])
+            self.timeline_summary.setText(
+                f"Crash timeline: {immediate} event(s) immediately before the journal ended. "
+                f"Last boundary: {boundary.get('timestamp', 'unknown time')} — {boundary.get('summary', '')}"
+            )
         for row, item in enumerate(items):
             values = [item.get("timestamp"), item.get("proximity"), item.get("category"), item.get("summary")]
             for col, value in enumerate(values): self.timeline_table.setItem(row, col, QTableWidgetItem(str(value)))
@@ -1098,6 +1115,27 @@ class MainWindow(QMainWindow):
         self.trend_chart.set_series([
             ("Critical", critical, QColor("#b42318")), ("Warnings", warning, QColor("#d97706")), ("Info", info, QColor("#2563eb")),
         ])
+        self.comparison_label.setText(self.compare_recent_scans(rows))
+
+    def compare_recent_scans(self, rows: list[dict[str, Any]]) -> str:
+        if len(rows) < 2:
+            return "Before/after comparison will appear after at least two saved scans."
+        before, after = rows[-2], rows[-1]
+        before_ids = {item.get("id", item.get("title", "")): item for item in before.get("findings", [])}
+        after_ids = {item.get("id", item.get("title", "")): item for item in after.get("findings", [])}
+        before_keys = set(before_ids)
+        after_keys = set(after_ids)
+        disappeared = [before_ids[key].get("title", key) for key in sorted(before_keys - after_keys)]
+        recurring = [after_ids[key].get("title", key) for key in sorted(before_keys & after_keys)]
+        new = [after_ids[key].get("title", key) for key in sorted(after_keys - before_keys)]
+        parts = []
+        if disappeared:
+            parts.append("Disappeared: " + ", ".join(disappeared[:4]))
+        if recurring:
+            parts.append("Still recurring: " + ", ".join(recurring[:4]))
+        if new:
+            parts.append("New: " + ", ".join(new[:4]))
+        return "Before/after comparison: " + ("; ".join(parts) if parts else "no finding changes between the last two scans.")
 
     def redact(self, text: str) -> str:
         if not self.privacy.isChecked(): return text

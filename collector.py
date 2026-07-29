@@ -198,12 +198,28 @@ def extract_pcie_devices(text: str, inventory: dict[str, dict[str, str]]) -> dic
             "count": 0,
             "description": inventory.get(address, {}).get("description", "Unknown PCIe device"),
             "driver": inventory.get(address, {}).get("driver", "unknown"),
+            "likely_role": pci_device_role(inventory.get(address, {}).get("description", ""), inventory.get(address, {}).get("driver", "")),
             "lines": [],
         })
         item["count"] += 1
         if len(item["lines"]) < 12:
             item["lines"].append(line.strip())
     return hits
+
+
+def pci_device_role(description: str, driver: str) -> str:
+    text = f"{description} {driver}".lower()
+    if any(token in text for token in ("wireless", "wi-fi", "wifi", "wlan", "802.11", "rtw", "iwl", "ath")):
+        return "Wi-Fi card"
+    if any(token in text for token in ("ethernet", "network", "realtek", "intel corporation ethernet")):
+        return "network adapter"
+    if any(token in text for token in ("usb", "xhci")):
+        return "USB controller, dock or hub path"
+    if any(token in text for token in ("vga", "display", "graphics", "nvidia", "amd/ati", "intel corporation hd graphics")):
+        return "graphics adapter"
+    if any(token in text for token in ("nvme", "sata", "storage")):
+        return "storage controller"
+    return "PCIe device"
 
 
 def load_baseline(path: str | None) -> dict[str, Any]:
@@ -442,7 +458,7 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         for address, item in sorted(repeated.items(), key=lambda pair: pair[1]["count"], reverse=True):
             device_details.append({"address": address, **item})
             evidence.append(
-                f"{address} — {item['description']} — driver {item['driver']} — {item['count']} events"
+                f"{address} — {item['likely_role']} — {item['description']} — driver {item['driver']} — {item['count']} events"
             )
             evidence.extend(item["lines"][-3:])
         findings.append({
@@ -665,12 +681,12 @@ def build_hypotheses(findings: list[dict[str, Any]], context: dict[str, Any], ch
             pcie_score += 0.05
         hypotheses.append({
             "rank": 0,
-            "title": f"PCIe link/device instability: {device.get('description', 'unknown device')}",
+            "title": f"PCIe link/device instability: {device.get('likely_role', 'PCIe device')} ({device.get('description', 'unknown device')})",
             "category": "PCIe / Network",
             "score": round(pcie_score, 2),
             "confidence": confidence_label(pcie_score),
             "supports": [
-                f"Address {device.get('address')} using driver {device.get('driver')} recorded {device.get('count')} matching bus events.",
+                f"Address {device.get('address')} appears to be a {device.get('likely_role', 'PCIe device')} using driver {device.get('driver')} and recorded {device.get('count')} matching bus events.",
                 "The parser matched the PCI address anywhere in the AER line and joined it to lspci.",
             ],
             "against": against,
@@ -740,7 +756,16 @@ def category_status(findings: list[dict[str, Any]], checks: dict[str, Any]) -> d
         if any(f["severity"] == "critical" for f in related):
             result[category] = {"status": "critical", "label": "Critical"}
         elif any(f["severity"] == "warning" for f in related):
-            result[category] = {"status": "warning", "label": "Needs attention"}
+            labels = {
+                "Graphics": "Try display-safe mode",
+                "PCIe / Network": "Check PCIe device",
+                "Storage": "Back up and test drive",
+                "Thermals": "Check cooling",
+                "Memory": "Check memory pressure",
+                "Firmware": "Check firmware",
+                "Software": "Review crash logs",
+            }
+            result[category] = {"status": "warning", "label": labels.get(category, "Needs attention")}
         else:
             related_checks = [c for c in checks.values() if c.get("category") == category]
             if any(c.get("status") == "ok" for c in related_checks):
