@@ -433,11 +433,15 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         refresh = QPushButton("Check capture readiness")
         validate = QPushButton("Validate kdump safely")
+        full_validate = QPushButton("Run full Fedora validation")
+        build_rpm = QPushButton("Build RPM package")
         cockpit = QPushButton("Install/open Cockpit (optional)")
         refresh.clicked.connect(self.refresh_capture_status)
         validate.clicked.connect(self.validate_kdump)
+        full_validate.clicked.connect(self.run_full_validation)
+        build_rpm.clicked.connect(self.build_rpm_package)
         cockpit.clicked.connect(self.install_cockpit)
-        buttons.addWidget(refresh); buttons.addWidget(validate); buttons.addWidget(cockpit); buttons.addStretch()
+        buttons.addWidget(refresh); buttons.addWidget(validate); buttons.addWidget(full_validate); buttons.addWidget(build_rpm); buttons.addWidget(cockpit); buttons.addStretch()
         self.capture_output = QPlainTextEdit(); self.capture_output.setReadOnly(True)
         layout.addWidget(text); layout.addLayout(buttons); layout.addWidget(self.capture_output, 1)
         self.tabs.addTab(page, "Crash capture")
@@ -1027,6 +1031,54 @@ class MainWindow(QMainWindow):
     def validate_kdump(self) -> None:
         self.set_busy(True, "Validating kdump without forcing a crash…")
         self.broker.request("kdump_validate", {}, self.test_done)
+
+    def run_full_validation(self) -> None:
+        if QMessageBox.question(self, "Run full Fedora validation?", "This will check capture readiness, kdump, SMART, stress readiness, and systemd units. It may take several minutes. Continue?") != QMessageBox.StandardButton.Yes: return
+        self.set_busy(True, "Running full Fedora validation…")
+        self.broker.request("capture_status", {}, self.validation_step)
+
+    def validation_step(self, ok: bool, data: Any) -> None:
+        if not ok:
+            self.set_busy(False)
+            QMessageBox.warning(self, "Validation failed", str(data))
+            return
+        output = {"capture_status": data}
+        self.capture_output.setPlainText(json.dumps(output, indent=2))
+        if QMessageBox.question(self, "Continue validation?", "Capture readiness passed. Continue with kdump validation?") != QMessageBox.StandardButton.Yes:
+            self.set_busy(False)
+            return
+        self.broker.request("kdump_validate", {}, lambda ok2, data2: self.validation_continue(ok2, data2, output))
+
+    def validation_continue(self, ok: bool, data: Any, output: dict[str, Any]) -> None:
+        output["kdump_validate"] = data
+        self.capture_output.setPlainText(json.dumps(output, indent=2))
+        if not ok:
+            self.set_busy(False)
+            QMessageBox.warning(self, "Validation failed", str(data))
+            return
+        self.broker.request("list_targets", {}, lambda ok3, data3: self.validation_finish(ok3, data3, output))
+
+    def validation_finish(self, ok: bool, data: Any, output: dict[str, Any]) -> None:
+        self.set_busy(False)
+        output["system_state"] = data
+        self.capture_output.setPlainText(json.dumps(output, indent=2))
+        if ok:
+            QMessageBox.information(self, "Validation complete", "Full Fedora validation completed. Review the output for details.")
+        else:
+            QMessageBox.warning(self, "Validation failed", str(data))
+
+    def build_rpm_package(self) -> None:
+        if QMessageBox.question(self, "Build RPM package?", "This will run the RPM build helper and require rpm-build. Continue?") != QMessageBox.StandardButton.Yes: return
+        self.set_busy(True, "Building RPM package…")
+        self.broker.request("build_rpm", {}, self.rpm_done)
+
+    def rpm_done(self, ok: bool, data: Any) -> None:
+        self.set_busy(False)
+        self.capture_output.setPlainText(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data))
+        if ok:
+            QMessageBox.information(self, "RPM build complete", "RPM build finished. Check the output for package paths.")
+        else:
+            QMessageBox.warning(self, "RPM build failed", str(data))
 
     def install_tools(self) -> None:
         if QMessageBox.question(self, "Install diagnostic tools?", "Install or repair the fixed Fedora diagnostic package set? Cockpit is not included.") != QMessageBox.StandardButton.Yes: return
