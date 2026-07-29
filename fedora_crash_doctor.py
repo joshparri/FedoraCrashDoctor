@@ -472,20 +472,53 @@ class MainWindow(QMainWindow):
         self.fix_focus = QComboBox()
         self.fix_focus.addItems(["Selected finding", "Top likely cause", "All needs-attention items"])
         self.fix_focus.currentIndexChanged.connect(self.populate_fixes)
+        copy_btn = QPushButton("Copy commands")
+        terminal_btn = QPushButton("Run in terminal")
+        explain_btn = QPushButton("Explain commands")
+        display_btn = QPushButton("Open Display Settings")
+        logs_btn = QPushButton("Open filtered logs")
+        reboot_scan_btn = QPushButton("Scan after reboot")
         capture_btn = QPushButton("Enable evidence capture")
         kdump_btn = QPushButton("Validate kdump")
         rescan_btn = QPushButton("Run quick scan after changes")
+        copy_btn.clicked.connect(self.copy_fix_commands)
+        terminal_btn.clicked.connect(self.run_fix_commands_terminal)
+        explain_btn.clicked.connect(self.explain_fix_commands)
+        display_btn.clicked.connect(self.open_display_settings)
+        logs_btn.clicked.connect(self.open_filtered_logs)
+        reboot_scan_btn.clicked.connect(self.schedule_scan_after_reboot)
         capture_btn.clicked.connect(self.enable_capture)
         kdump_btn.clicked.connect(self.validate_kdump)
         rescan_btn.clicked.connect(lambda: self.run_scan("quick"))
         controls.addWidget(QLabel("Fix plan for:"))
         controls.addWidget(self.fix_focus)
+        controls.addWidget(copy_btn)
+        controls.addWidget(terminal_btn)
+        controls.addWidget(explain_btn)
+        controls.addWidget(display_btn)
+        controls.addWidget(logs_btn)
+        controls.addWidget(reboot_scan_btn)
         controls.addWidget(capture_btn)
         controls.addWidget(kdump_btn)
         controls.addWidget(rescan_btn)
         controls.addStretch()
+        verify = QHBoxLayout()
+        for label, state in (
+            ("Mark rebooted", "rebooted"),
+            ("Marked tested one monitor", "tested_one_monitor"),
+            ("Mark stable", "stable_after_change"),
+            ("Mark still freezing", "still_freezing"),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, value=state: self.record_verification(value))
+            verify.addWidget(button)
+        verify.addStretch()
+        self.verification_label = QLabel("Verification: no fix step marked yet.")
+        self.verification_label.setWordWrap(True)
         self.fix_detail = QTextBrowser()
         layout.addLayout(controls)
+        layout.addLayout(verify)
+        layout.addWidget(self.verification_label)
         layout.addWidget(self.fix_detail, 1)
         self.tabs.addTab(page, "Fix / next steps")
 
@@ -530,6 +563,152 @@ class MainWindow(QMainWindow):
     def top_hypothesis(self) -> dict[str, Any] | None:
         items = self.report.get("hypotheses", []) if self.report else []
         return items[0] if items else None
+
+    def verification_path(self) -> Path:
+        return self.report_dir / "fix-verification.json"
+
+    def load_verification(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.verification_path().read_text())
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def save_verification(self, data: dict[str, Any]) -> None:
+        self.report_dir.mkdir(parents=True, exist_ok=True)
+        self.verification_path().write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+    def record_verification(self, state: str) -> None:
+        data = self.load_verification()
+        data[state] = datetime.now().isoformat(timespec="seconds")
+        self.save_verification(data)
+        self.update_verification_label()
+
+    def update_verification_label(self) -> None:
+        if not hasattr(self, "verification_label"):
+            return
+        data = self.load_verification()
+        if not data:
+            self.verification_label.setText("Verification: no fix step marked yet.")
+            return
+        labels = {
+            "rebooted": "rebooted",
+            "tested_one_monitor": "tested one-monitor mode",
+            "stable_after_change": "stable after change",
+            "still_freezing": "still freezing",
+            "scan_after_reboot": "scan scheduled after reboot",
+        }
+        parts = [f"{labels.get(key, key)} at {value}" for key, value in sorted(data.items())]
+        self.verification_label.setText("Verification: " + "; ".join(parts))
+
+    def current_fix_item(self) -> dict[str, Any]:
+        return self.selected_finding() or self.top_hypothesis() or {}
+
+    def current_fix_commands(self) -> list[str]:
+        return self.fix_commands_for_item(self.current_fix_item())
+
+    def fix_commands_for_item(self, item: dict[str, Any]) -> list[str]:
+        title = str(item.get("title", ""))
+        category = str(item.get("category", ""))
+        lower = f"{title} {category} {item.get('id', '')}".lower()
+        if "intel" in lower or "display" in lower or "graphics" in lower or "kwin" in lower:
+            return [
+                "sudo dnf upgrade --refresh 'kernel*' 'mesa*' 'plasma*' 'kwin*' 'kscreen*' linux-firmware",
+                "fwupdmgr refresh --force",
+                "fwupdmgr get-updates",
+                "sudo fwupdmgr update",
+                "systemctl reboot",
+            ]
+        if "pcie" in lower or "bus" in lower:
+            return ["lspci -Dnnk", "fwupdmgr refresh --force", "fwupdmgr get-updates", "sudo fwupdmgr update"]
+        if "memory" in lower or "oom" in lower:
+            return ["free -h", "ps -eo pid,comm,%mem,%cpu --sort=-%mem | head -20", "swapon --show"]
+        if "thermal" in lower:
+            return ["sensors", "journalctl -k --since '24 hours ago' | grep -iE 'thermal|throttl|overheat|critical temperature'"]
+        if "storage" in lower or "smart" in lower or "btrfs" in lower:
+            return ["lsblk -o NAME,PATH,TYPE,SIZE,MODEL,SERIAL,FSTYPE,MOUNTPOINTS", "sudo smartctl --scan-open", "sudo btrfs scrub status /"]
+        return []
+
+    def copy_fix_commands(self) -> None:
+        commands = self.current_fix_commands()
+        if not commands:
+            QMessageBox.information(self, "No commands", "This fix plan has no shell commands.")
+            return
+        QApplication.clipboard().setText("\n".join(commands))
+        self.set_status("Fix commands copied to clipboard.")
+
+    def run_fix_commands_terminal(self) -> None:
+        commands = self.current_fix_commands()
+        if not commands:
+            QMessageBox.information(self, "No commands", "This fix plan has no shell commands to run.")
+            return
+        command_text = " && ".join(commands)
+        message = f"This will open a terminal and run:\n\n{command_text}\n\nContinue?"
+        if QMessageBox.question(self, "Run commands?", message) != QMessageBox.StandardButton.Yes:
+            return
+        terminal = shutil.which("konsole") or shutil.which("xterm")
+        if not terminal:
+            QMessageBox.information(self, "No terminal", "Konsole or xterm is required to run commands from the app.")
+            return
+        if Path(terminal).name == "konsole":
+            subprocess.Popen([terminal, "-e", "bash", "-lc", f"{command_text}; echo; read -n 1 -s -r -p 'Press any key to close'"], start_new_session=True)
+        else:
+            subprocess.Popen([terminal, "-e", "bash", "-lc", command_text], start_new_session=True)
+
+    def explain_fix_commands(self) -> None:
+        commands = self.current_fix_commands()
+        if not commands:
+            QMessageBox.information(self, "No commands", "This fix plan has no shell commands.")
+            return
+        explanations = []
+        for command in commands:
+            if command.startswith("sudo dnf upgrade"):
+                text = "Updates kernel, Mesa graphics, KDE display components and linux-firmware."
+            elif command.startswith("fwupdmgr refresh"):
+                text = "Refreshes firmware metadata from LVFS."
+            elif command.startswith("fwupdmgr get-updates"):
+                text = "Lists available firmware updates without installing them."
+            elif command.startswith("sudo fwupdmgr update"):
+                text = "Installs available firmware updates and may require reboot or power cycle."
+            elif command.startswith("systemctl reboot"):
+                text = "Reboots so kernel, graphics and firmware changes take effect."
+            elif command.startswith("lspci"):
+                text = "Shows PCIe device addresses, names and drivers."
+            else:
+                text = "Collects supporting diagnostic context."
+            explanations.append(f"<li><code>{html.escape(command)}</code><br>{html.escape(text)}</li>")
+        QMessageBox.information(self, "Command explanations", "<ul>" + "".join(explanations) + "</ul>")
+
+    def open_display_settings(self) -> None:
+        for argv in (["systemsettings", "kcm_kscreen"], ["kcmshell6", "kcm_kscreen"], ["kcmshell5", "kcm_kscreen"]):
+            if shutil.which(argv[0]):
+                subprocess.Popen(argv, start_new_session=True)
+                return
+        QMessageBox.information(self, "Display settings", "KDE Display settings command was not found.")
+
+    def open_filtered_logs(self) -> None:
+        command = "journalctl --since '48 hours ago' --no-pager | grep -iE 'i915|drm|kwin|GPU HANG|reset|atomic update failure|pcie|aer|bad dllp|receiver error' | tail -300"
+        terminal = shutil.which("konsole") or shutil.which("xterm")
+        if terminal and Path(terminal).name == "konsole":
+            subprocess.Popen([terminal, "-e", "bash", "-lc", command + "; echo; read -n 1 -s -r -p 'Press any key to close'"], start_new_session=True)
+        elif terminal:
+            subprocess.Popen([terminal, "-e", "bash", "-lc", command], start_new_session=True)
+        else:
+            QMessageBox.information(self, "Filtered logs", command)
+
+    def schedule_scan_after_reboot(self) -> None:
+        autostart = Path.home() / ".config" / "autostart"
+        autostart.mkdir(parents=True, exist_ok=True)
+        desktop = autostart / "fedora-crash-doctor.desktop"
+        desktop.write_text(
+            "[Desktop Entry]\nType=Application\nName=Fedora Crash Doctor\n"
+            "Exec=fedora-crash-doctor\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+        )
+        data = self.load_verification()
+        data["scan_after_reboot"] = datetime.now().isoformat(timespec="seconds")
+        self.save_verification(data)
+        self.update_verification_label()
+        self.set_status("Fedora Crash Doctor will open after reboot so you can run the next scan.")
 
     def show_fix_for_selection(self) -> None:
         self.fix_focus.setCurrentText("Selected finding")
@@ -620,8 +799,12 @@ class MainWindow(QMainWindow):
                 "Compare whether this item stays recurring, disappears, or is replaced by a more specific finding.",
             ]
             app_actions = "Use Enable evidence capture, Validate kdump, and Run quick scan after changes."
+        commands = self.fix_commands_for_item(item)
+        for command in commands:
+            if all(command not in step for step in steps):
+                steps.append(f"Command: {command}")
         steps_html = "".join(f"<li>{html.escape(step)}</li>" for step in steps)
-        command_lines = [step for step in steps if any(token in step for token in ("sudo ", "dnf ", "fwupdmgr ", "systemctl ", "lspci ", "free ", "ps ", "swapon ", "sensors", "journalctl ", "lsblk ", "smartctl ", "btrfs ", "watch "))]
+        command_lines = commands
         commands_html = ""
         if command_lines:
             commands = "\n".join(line.split(": ", 1)[-1] for line in command_lines)
@@ -702,6 +885,7 @@ class MainWindow(QMainWindow):
             ("I/O PSI", [float(x.get("psi_io_some_avg10", 0) or 0) for x in samples], QColor("#1570ef")),
         ])
         self.smart_device.clear(); self.smart_device.addItems(self.report.get("test_targets", {}).get("smart_devices", []))
+        self.update_verification_label()
         self.refresh_trends()
 
     def filtered_findings(self) -> list[dict[str, Any]]:
