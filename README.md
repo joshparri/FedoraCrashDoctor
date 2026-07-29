@@ -23,9 +23,17 @@ It is designed to answer three questions after a crash:
   Firmware and Software.
 - **Determinate progress**, current scan step, and a Cancel button.
 - Finding filters for **This incident**, **New**, **Recurring** and serious items.
+- A **Fix / next steps** workflow with issue-specific fix cards, command blocks,
+  copy/run/explain buttons, KDE Display Settings and filtered-log launchers,
+  scan-after-reboot scheduling, and manual verification tracking.
+- Before/after scan comparison highlights findings that disappeared, stayed
+  recurring, or newly appeared after a change.
+- Plain-English category labels such as **Try display-safe mode** and
+  **Check PCIe device** replace vague “needs attention” wording where the
+  evidence supports a more specific next move.
 - Corrected PCIe events are joined to the actual `lspci -Dnnk` address, device
-  description and active kernel driver. The address can appear anywhere in the
-  AER log line.
+  description, likely user-facing device role and active kernel driver. The
+  address can appear anywhere in the AER log line.
 - `perf: interrupt took too long` is treated as contextual information about perf
   sampling-rate adjustment, not a reliable crash predictor by itself.
 - The low-write **system canary** captures CPU/memory/I/O PSI, temperatures, CPU
@@ -68,6 +76,8 @@ Open the KDE application launcher and search for **Fedora Crash Doctor**.
 5. Run a **Quick scan**.
 6. After another crash, let the boot-time autoscan load, then review the incident
    timeline and ranked causes.
+7. Open **Fix / next steps**, copy or run the suggested commands, mark what you
+   changed, reboot if requested, and run another scan to compare before/after.
 
 ## Privilege model
 

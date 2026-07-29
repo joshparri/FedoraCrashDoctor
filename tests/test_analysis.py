@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from collector import analyse, build_hypotheses, build_timeline, extract_pcie_devices, parse_lspci_inventory
+from collector import analyse, analyse_canary, build_hypotheses, build_timeline, extract_pcie_devices, parse_lspci_inventory
 
 
 def check(title, output, category="Software", status="ok"):
@@ -22,6 +22,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertIn("0000:02:00.0", hits)
         self.assertEqual(hits["0000:02:00.0"]["driver"], "rtw88_8821ce")
         self.assertIn("RTL8821CE", hits["0000:02:00.0"]["description"])
+        self.assertEqual(hits["0000:02:00.0"]["likely_role"], "Wi-Fi card")
         self.assertEqual(hits["0000:02:00.0"]["count"], 2)
 
     def test_perf_interrupt_message_is_information_not_warning(self):
@@ -65,6 +66,14 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(hypotheses[0]["category"], "Graphics")
         oom = [h for h in hypotheses if h["title"] == "Out-of-memory crash"][0]
         self.assertEqual(oom["confidence"], "low")
+
+    def test_canary_handles_null_desktop_heartbeat_age(self):
+        checks = {
+            "canary_log": check("canary", '{"ts":"now","desktop_heartbeat_age_s":null,"kwin_ok":null}\n')
+        }
+        result = analyse_canary(checks)
+        self.assertIn("samples", result)
+        self.assertIn("heartbeat", result["interpretation"])
 
 
 if __name__ == "__main__":
