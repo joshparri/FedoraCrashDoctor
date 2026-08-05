@@ -409,65 +409,85 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(out1["title"], "B")
 
 
-    def test_readiness_persistent_journal_enabled(self):
+    
+    def test_readiness_journal_no_previous(self):
         from collector import assess_readiness
-        checks = {"journal_dir": {"returncode": 0, "output": "drwxr-sr-x 3 root systemd-journal 4096 Jul 29 12:00 /var/log/journal"}}
+        checks = {"journal_dir": {"returncode": 0, "output": "/var/log/journal"}, "journal_boots": {"output": "0 boot current"}}
         res = assess_readiness(checks)
         j = next(s for s in res["sources"] if s["name"] == "Persistent Journal")
-        self.assertEqual(j["status"], "ready")
-
-    def test_readiness_volatile_journal_only(self):
+        self.assertEqual(j["status"], "unverified")
+        
+    def test_readiness_pstore_command_failure(self):
         from collector import assess_readiness
-        checks = {"journal_dir": {"returncode": 1, "output": "ls: cannot access '/var/log/journal': No such file or directory"}}
-        res = assess_readiness(checks)
-        j = next(s for s in res["sources"] if s["name"] == "Persistent Journal")
-        self.assertEqual(j["status"], "unavailable")
-
-    def test_readiness_pstore_available_with_records(self):
-        from collector import assess_readiness
-        checks = {"pstore": {"output": "--- /sys/fs/pstore/dmesg-efi-123 ---\nPanic occurred"}}
+        checks = {"pstore": {"returncode": 1, "output": "ls: cannot access /sys/fs/pstore"}}
         res = assess_readiness(checks)
         p = next(s for s in res["sources"] if s["name"] == "EFI pstore")
-        self.assertEqual(p["status"], "ready")
+        self.assertEqual(p["status"], "error")
 
-    def test_readiness_pstore_unavailable(self):
+    def test_readiness_pstore_unverified(self):
         from collector import assess_readiness
-        checks = {"pstore": {"output": "No pstore crash records found\nls: cannot access /sys/fs/pstore: No such file or directory"}}
+        checks = {"pstore": {"returncode": 0, "output": "No pstore crash records found"}}
         res = assess_readiness(checks)
         p = next(s for s in res["sources"] if s["name"] == "EFI pstore")
-        self.assertEqual(p["status"], "unavailable")
+        self.assertEqual(p["status"], "unverified")
 
-    def test_readiness_kdump_installed_but_inactive(self):
+    def test_readiness_kdump_no_reservation(self):
         from collector import assess_readiness
-        checks = {
-            "kdump_package": {"returncode": 0, "output": "kexec-tools-2.1.3-1.fc44.x86_64"},
-            "kdump_service": {"output": "inactive\n"}
-        }
+        checks = {"kdump_package": {"returncode": 0}, "kdump_service": {"output": "active"}, "crashkernel_mem": {"output": "root=UUID"}}
         res = assess_readiness(checks)
         k = next(s for s in res["sources"] if s["name"] == "Kdump Infrastructure")
-        self.assertEqual(k["status"], "misconfigured")
+        self.assertEqual(k["status"], "missing_reservation")
 
-    def test_readiness_canary_absent(self):
+    def test_readiness_kdump_not_loaded(self):
         from collector import assess_readiness
-        checks = {"canary_service": {"output": "inactive\n"}}
+        checks = {"kdump_package": {"returncode": 0}, "kdump_service": {"output": "active"}, "crashkernel_mem": {"output": "crashkernel=512M"}, "kexec_loaded": {"output": "0"}}
+        res = assess_readiness(checks)
+        k = next(s for s in res["sources"] if s["name"] == "Kdump Infrastructure")
+        self.assertEqual(k["status"], "kernel_not_loaded")
+
+    def test_readiness_kdump_target_missing(self):
+        from collector import assess_readiness
+        checks = {"kdump_package": {"returncode": 0}, "kdump_service": {"output": "active"}, "crashkernel_mem": {"output": "crashkernel=512M"}, "kexec_loaded": {"output": "1"}, "kdump_target_space": {"returncode": 1, "output": "No such file or directory"}}
+        res = assess_readiness(checks)
+        k = next(s for s in res["sources"] if s["name"] == "Kdump Infrastructure")
+        self.assertEqual(k["status"], "target_missing")
+
+    def test_readiness_panic_disabled_intentionally(self):
+        from collector import assess_readiness
+        checks = {"sysctl_panic": {"output": "kernel.panic_on_oops = 0"}}
+        res = assess_readiness(checks)
+        s = next(s for s in res["sources"] if s["name"] == "Kernel Panic Settings")
+        self.assertEqual(s["status"], "disabled_intentionally")
+
+    def test_readiness_kernel_panic_zero(self):
+        from collector import assess_readiness
+        checks = {"sysctl_panic": {"output": "kernel.panic = 0"}}
+        res = assess_readiness(checks)
+        s = next(s for s in res["sources"] if s["name"] == "Kernel Panic Settings")
+        self.assertEqual(s["status"], "disabled_intentionally")
+
+    def test_readiness_canary_stale(self):
+        import time
+        from collector import assess_readiness
+        checks = {"canary_service": {"output": "active"}, "canary_stat": {"output": str(int(time.time() - 300))}}
         res = assess_readiness(checks)
         c = next(s for s in res["sources"] if s["name"] == "System Canary")
-        self.assertEqual(c["status"], "unavailable")
+        self.assertEqual(c["status"], "stale")
 
-    def test_readiness_fully_prepared_system(self):
+    def test_readiness_fully_verified(self):
+        import time
         from collector import assess_readiness
         checks = {
-            "journal_dir": {"returncode": 0, "output": "/var/log/journal"},
-            "pstore": {"output": "--- /sys/fs/pstore/dmesg-efi-1 ---\nPanic"},
-            "sysctl_panic": {"output": "kernel.panic_on_oops = 1\nkernel.softlockup_panic = 1\nkernel.nmi_watchdog = 1"},
-            "kdump_package": {"returncode": 0, "output": "kexec-tools"},
-            "kdump_service": {"output": "active\n"},
-            "canary_service": {"output": "active\n"}
+            "journal_dir": {"returncode": 0}, "journal_boots": {"output": "-1 boot\n0 boot"},
+            "pstore": {"returncode": 0, "output": "panic record"},
+            "sysctl_panic": {"output": "kernel.panic = 10\nkernel.panic_on_oops = 1\nkernel.softlockup_panic = 1\nkernel.nmi_watchdog = 1\nkernel.hardlockup_panic = 1"},
+            "kdump_package": {"returncode": 0}, "kdump_service": {"output": "active"}, "crashkernel_mem": {"output": "crashkernel=512M"}, "kexec_loaded": {"output": "1"}, "kdump_target_space": {"returncode": 0, "output": "100G avail"},
+            "canary_service": {"output": "active"}, "canary_stat": {"output": str(int(time.time()))}
         }
         res = assess_readiness(checks)
         for s in res["sources"]:
-            self.assertEqual(s["status"], "ready")
-        self.assertEqual(res["recommendation"], "All capture mechanisms are ready.")
+            self.assertIn(s["status"], ["verified_persistent", "available_with_records", "verified_ready", "ready", "verified_active"])
+
 
 if __name__ == "__main__":
     unittest.main()

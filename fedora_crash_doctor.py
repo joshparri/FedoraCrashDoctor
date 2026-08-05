@@ -438,8 +438,12 @@ class MainWindow(QMainWindow):
         validate.clicked.connect(self.validate_kdump)
         cockpit.clicked.connect(self.install_cockpit)
         buttons.addWidget(refresh); buttons.addWidget(validate); buttons.addWidget(cockpit); buttons.addStretch()
+        self.readiness_detail = QTextBrowser()
         self.capture_output = QPlainTextEdit(); self.capture_output.setReadOnly(True)
-        layout.addWidget(text); layout.addLayout(buttons); layout.addWidget(self.capture_output, 1)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self.readiness_detail)
+        splitter.addWidget(self.capture_output)
+        layout.addWidget(text); layout.addLayout(buttons); layout.addWidget(splitter, 1)
         self.tabs.addTab(page, "Crash capture")
 
     def build_tests_tab(self) -> None:
@@ -883,7 +887,7 @@ class MainWindow(QMainWindow):
         for category, card in self.cards.items():
             state = self.report.get("categories", {}).get(category, {"status": "not_checked", "label": "Not checked"})
             card.set_state(state.get("label", "Not checked"), state.get("status", "not_checked"))
-        self.populate_findings(); self.populate_hypotheses(); self.populate_timeline(); self.populate_checks(); self.populate_fixes()
+        self.populate_findings(); self.populate_hypotheses(); self.populate_timeline(); self.populate_checks(); self.populate_fixes(); self.populate_readiness()
         canary = self.report.get("canary", {})
         self.canary_label.setText(canary.get("interpretation", "No canary interpretation."))
         samples = canary.get("samples", [])[-120:]
@@ -957,6 +961,31 @@ class MainWindow(QMainWindow):
         )
         if self.fix_focus.currentText() == "Top likely cause":
             self.populate_fixes()
+
+
+    def populate_readiness(self) -> None:
+        if not hasattr(self, "readiness_detail"):
+            return
+        if not self.report:
+            self.readiness_detail.setHtml("<h2>No scan loaded</h2><p>Run a quick scan to assess crash capture readiness.</p>")
+            return
+            
+        readiness = self.report.get("readiness", {})
+        html = ["<h2>Crash Capture Readiness</h2>"]
+        html.append(f"<p><b>Recommendation:</b> {readiness.get('recommendation', 'Unknown')}</p>")
+        
+        for s in readiness.get("sources", []):
+            color = "green" if s.get("status") in ("ready", "verified_persistent", "available_with_records", "verified_ready", "verified_active") else "orange" if s.get("status") in ("ready_empty", "disabled_intentionally") else "red"
+            html.append(f"<h3><span style='color:{color};'>&#9679;</span> {s.get('name', '')}</h3>")
+            html.append(f"<ul>")
+            html.append(f"<li><b>Status:</b> {s.get('status', '')}</li>")
+            if s.get("evidence"): html.append(f"<li><b>Evidence:</b> {s.get('evidence')}</li>")
+            if s.get("limitation"): html.append(f"<li><b>Limitation:</b> {s.get('limitation')}</li>")
+            if s.get("setup"): html.append(f"<li><b>Optional Setup:</b> {s.get('setup')}</li>")
+            if s.get("implications"): html.append(f"<li><b>Implications:</b> {s.get('implications')}</li>")
+            html.append(f"</ul>")
+            
+        self.readiness_detail.setHtml("".join(html))
 
     def populate_timeline(self) -> None:
         items = self.report.get("timeline", []) if self.report else []
