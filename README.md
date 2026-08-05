@@ -67,6 +67,16 @@ are preserved.
 
 Open the KDE application launcher and search for **Fedora Crash Doctor**.
 
+## Development setup
+
+To work on Fedora Crash Doctor locally without installing it system-wide:
+
+1. Open a terminal inside the project directory.
+2. Ensure you have standard Python 3 and basic KDE dependencies installed.
+3. Run the test suite: `./run_tests.sh`
+4. Run the main GUI application: `python3 fedora_crash_doctor.py`
+5. Generate a test scan manually (writes a JSON report): `python3 collector.py --output test_scan.json`
+
 ## Recommended first use
 
 1. Open Fedora Crash Doctor.

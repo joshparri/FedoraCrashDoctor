@@ -418,11 +418,14 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
          r"SMART overall-health.*FAILED|SMART Health Status:.*(?:BAD|FAILED)|critical_warning\s*:\s*[1-9]|medium error|I/O error.*(?:nvme|sd[a-z])",
          "A drive or storage path reported a potentially serious reliability problem.", "high"),
         ("intel_display", "warning", "Graphics", "Intel graphics/display pipeline errors",
-         r"i915.*atomic update failure|GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT|i915.*GPU HANG|i915.*reset",
+         r"(?:i915|xe\s).*atomic update failure|GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT|(?:i915|xe\s).*GPU HANG|(?:i915|xe\s).*reset",
          "Intel DRM/KWin display failures can cause black screens, compositor stalls or a full freeze.", "moderate"),
         ("other_gpu", "warning", "Graphics", "GPU reset or timeout",
          r"amdgpu.*(?:reset|timeout|ring.*stalled)|nouveau.*(?:timeout|fault)|nvidia.*Xid|drm.*flip_done timed out",
          "A graphics driver or GPU timeout was recorded.", "moderate"),
+        ("wayland", "warning", "Graphics", "Wayland compositor or session error",
+         r"wayland.*(?:crash|fatal|error|disconnect|terminate)|kwin_wayland.*(?:segfault|core dump|aborted)",
+         "The Wayland display server or compositor reported a crash or disconnection.", "moderate"),
         ("oom", "warning", "Memory", "Memory exhaustion",
          r"out of memory|oom-kill|killed process|systemd-oomd.*killed",
          "The machine ran out of usable memory or an OOM service terminated processes.", "high"),
@@ -440,10 +443,22 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         lines = evidence_lines(prev, pattern)
         scope = "this_incident"
         if not lines:
-            lines = evidence_lines(history if fid in {"intel_display", "other_gpu", "oom", "pcie"} else all_text, pattern)
+            lines = evidence_lines(history if fid in {"intel_display", "other_gpu", "wayland", "oom", "pcie"} else all_text, pattern)
             scope = "historical"
         if lines:
             findings.append(_make_finding(fid, severity, category, title, explanation, lines, scope, confidence))
+
+    failed_units_text = checks.get("failed_units", {}).get("output", "")
+    failed_lines = [
+        line.strip() for line in failed_units_text.splitlines()
+        if " failed " in line and not line.startswith("UNIT") and "units listed" not in line
+    ]
+    if failed_lines:
+        findings.append(_make_finding(
+            "failed_services", "warning", "Software", "Failed system services",
+            "One or more systemd services failed to start or crashed.",
+            failed_lines[:10], "this_incident", "high"
+        ))
 
     inventory = parse_lspci_inventory(checks.get("pci", {}).get("output", ""))
     pcie_hits = extract_pcie_devices(
@@ -510,7 +525,7 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         "pci_inventory": inventory,
         "pcie_devices": pcie_hits,
         "hard_crash": bool(crash_lines),
-        "has_gpu_errors": any(f["id"] in {"intel_display", "other_gpu"} for f in findings),
+        "has_gpu_errors": any(f["id"] in {"intel_display", "other_gpu", "wayland"} for f in findings),
         "has_oom": any(f["id"] == "oom" for f in findings),
         "has_thermal": any(f["id"] == "thermal" for f in findings),
         "has_storage": any(f["id"] in {"storage_failure", "filesystem"} for f in findings),
@@ -546,7 +561,7 @@ def build_timeline(checks: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     end_time = max(ts for ts, _ in parsed)
     patterns = [
-        ("Graphics", r"i915|amdgpu|nvidia|nouveau|atomic update failure|framebuffer|kwin|context provider|compositor"),
+        ("Graphics", r"i915|xe |amdgpu|nvidia|nouveau|atomic update|framebuffer|kwin|context provider|compositor|wayland"),
         ("Memory", r"out of memory|oom-kill|killed process|edac|mce:"),
         ("PCIe / Network", r"pcie bus error|aer:|bad dllp|receiver error|failed to resolve|NetworkManager"),
         ("Thermals", r"thermal|overheat|throttl|critical temperature"),
