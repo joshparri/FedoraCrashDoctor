@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from collector import analyse, analyse_canary, build_hypotheses, build_timeline, extract_pcie_devices, parse_lspci_inventory
+from collector import analyse, analyse_canary, build_incidents, build_timeline, extract_pcie_devices, parse_lspci_inventory
 
 
 def check(title, output, category="Software", status="ok"):
@@ -53,19 +53,70 @@ class AnalysisTests(unittest.TestCase):
 
     def test_graphics_hypothesis_ranks_above_unsupported_oom(self):
         checks = {
-            "previous_boot_tail": check("tail", "kwin GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT\nchrome context provider failed"),
-            "gpu_error_state": check("gpu", "No error state collected"),
-            "pstore": check("pstore", "No pstore crash records found."),
+            "previous_errors": check("prev", "2026-07-29T12:26:00+1000 host kernel: i915 0000:00:02.0: [drm] *ERROR* Atomic update failure on pipe A"),
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST")
         }
-        findings = [{"id": "intel_display"}, {"id": "unclean_boot"}]
-        context = {
-            "hard_crash": True, "has_gpu_errors": True, "has_oom": False,
-            "has_thermal": False, "has_storage": False, "has_panic": False,
+        findings, _ = analyse(checks)
+        incidents, _ = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 1)
+        self.assertTrue("Display-stack freeze" in incidents[0]["strongest_hypothesis"])
+
+    def test_old_i915_message_unrelated_to_current_incident(self):
+        checks = {
+            "display_history": check("disp", "2026-07-29T12:26:00+1000 host kernel: i915 atomic update failure on pipe A"),
+            "boot_history": check("boot", ""),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
         }
-        hypotheses = build_hypotheses(findings, context, checks, {"samples": []})
-        self.assertEqual(hypotheses[0]["category"], "Graphics")
-        oom = [h for h in hypotheses if h["title"] == "Out-of-memory crash"][0]
-        self.assertEqual(oom["confidence"], "low")
+        findings, _ = analyse(checks)
+        findings[0]["evidence"] = ["2026-07-29T12:26:00+1000 host kernel: i915 atomic update failure on pipe A"]
+        incidents, _ = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 0)
+
+    def test_repeated_correctable_pcie_errors_without_crash(self):
+        checks = {
+            "hardware_errors_history": check("hw", "2026-07-29T13:26:00+1000 host kernel: pcieport 0000:00:1c.0: AER: Multiple Correctable error message received\n2026-07-29T13:26:00+1000 host kernel: pcieport 0000:00:1c.0: AER: Multiple Correctable error message received\npcieport 0000:00:1c.0: AER: Multiple Correctable error message received"),
+            "pci": check("pci", "0000:00:1c.0 PCI bridge [0604]: Intel"),
+            "boot_history": check("boot", ""),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, _ = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 1)
+        self.assertTrue("PCIe" in incidents[0]["strongest_hypothesis"])
+        self.assertTrue("Active Warning" in incidents[0]["strongest_hypothesis"])
+
+    def test_oom_kill_precedes_frozen_session(self):
+        checks = {
+            "oom_previous": check("oom", "2026-07-29T12:26:00+1000 host kernel: Out of memory: Killed process"),
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, _ = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 1)
+        self.assertTrue("Out-of-memory" in incidents[0]["strongest_hypothesis"])
+
+    def test_multiple_unrelated_warnings_same_boot(self):
+        checks = {
+            "current_kernel_errors": check("curr", "2026-07-29T13:26:00+1000 host kernel: i915 atomic update failure\n2026-07-29T13:26:00+1000 host kernel: cpu clock throttled\n2026-07-29T13:26:00+1000 host kernel: Buffer I/O error on dev sda1"),
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, _ = build_incidents(findings, checks)
+        incidents_boot0 = [inc for inc in incidents if inc["boot_index"] == "0"]
+        self.assertTrue(len(incidents_boot0[0]["unrelated_warnings"]) > 0)
+
+    def test_crash_insufficient_evidence(self):
+        checks = {
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, _ = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 1)
+        self.assertTrue("Unknown Kernel, Firmware or Power Failure" in incidents[0]["strongest_hypothesis"])
 
     def test_canary_handles_null_desktop_heartbeat_age(self):
         checks = {

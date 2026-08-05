@@ -602,7 +602,7 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
     return findings, context
 
 
-_TS_RX = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{4})\s+(.*)$")
+_TS_RX = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\s+(.*)$")
 
 
 def parse_journal_time(line: str) -> datetime | None:
@@ -717,119 +717,276 @@ def numeric_score(item: dict[str, Any]) -> float:
         return 0.0
 
 
-def build_hypotheses(findings: list[dict[str, Any]], context: dict[str, Any], checks: dict[str, Any], canary: dict[str, Any]) -> list[dict[str, Any]]:
-    ids = {item["id"] for item in findings}
-    hypotheses: list[dict[str, Any]] = []
 
-    graphics_support = []
-    graphics_against = []
-    score = 0.0
-    if "intel_display" in ids or "other_gpu" in ids:
-        score += 0.42
-        graphics_support.append("Graphics/DRM errors were recorded in or around the affected boot.")
-    previous = checks.get("previous_boot_tail", {}).get("output", "")
-    if re.search(r"kwin|GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT", previous, re.I):
-        score += 0.18
-        graphics_support.append("KWin/framebuffer errors were present.")
-    if re.search(r"context provider failed|compositor.*active for too long", previous, re.I):
-        score += 0.15
-        graphics_support.append("Chrome compositor or video-capture graphics contexts were failing shortly before the reboot.")
-    if context["hard_crash"]:
-        score += 0.10
-        graphics_support.append("The session ended as an unclean hard crash rather than a normal application exit.")
-    if "No error state collected" in checks.get("gpu_error_state", {}).get("output", ""):
-        graphics_against.append("The current boot exposes no preserved formal GPU-hang dump.")
-    if score:
-        hypotheses.append({
-            "rank": 0,
-            "title": "Intel/KWin display-stack freeze",
-            "category": "Graphics",
-            "score": round(min(score, 0.95), 2),
-            "confidence": confidence_label(score),
-            "supports": graphics_support,
-            "against": graphics_against or ["No decisive counter-evidence was collected."],
-            "next_test": "Run the next important call with one monitor connected directly at 8-bit SDR/60 Hz, then compare a new scan.",
-            "would_confirm": "The errors disappear and the crash does not recur in the reduced display configuration, or a future crash preserves an i915/KWin GPU reset/hang near the boundary.",
-            "would_weaken": "The same crash occurs with one monitor and no graphics errors, while another subsystem records a closer fault.",
+
+def parse_boots_from_journal(checks):
+    boots = {}
+    out = checks.get("journal_boots", {}).get("output", "")
+    for line in out.splitlines():
+        # Handle variations in locale/timezone by just extracting the YYYY-MM-DD HH:MM:SS
+        import re
+        from datetime import datetime
+        m = re.match(r"^\s*([-\d]+)\s+([a-f0-9]{32})\s+.*?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", line)
+        if m:
+            idx, boot_id, start_str, end_str = m.groups()
+            boots[idx] = {
+                "idx": idx,
+                "id": boot_id,
+                "start": datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S"),
+                "end": datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S"),
+            }
+    return boots
+
+def get_boot_for_ts(ts, boots):
+    if not ts: return "unknown"
+    from datetime import timedelta
+    naive_ts = ts.replace(tzinfo=None)
+    for b in boots.values():
+        if b["start"] - timedelta(minutes=5) <= naive_ts <= b["end"] + timedelta(minutes=5):
+            return b["idx"]
+    return "unknown"
+
+def build_incidents(findings, checks):
+    boots = parse_boots_from_journal(checks)
+    import re
+    from datetime import datetime, timedelta
+    
+    # 1. Identify failure boundaries
+    boundaries = []
+    
+    # Unclean boots
+    crash_lines = evidence_lines(checks.get("boot_history", {}).get("output", ""), r"\s-crash\s|crash\s+\(", 20)
+    if crash_lines and "-1" in boots:
+        boundaries.append({"boot": "-1", "type": "unclean shutdown", "ts": boots["-1"]["end"]})
+        
+    unclean_f = next((f for f in findings if f["id"] == "unclean_boot"), None)
+    if unclean_f:
+        for line in unclean_f.get("evidence", []):
+            m = re.search(r"([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2})\s+-\s+crash", line)
+            if m:
+                try:
+                    dt = datetime.strptime(m.group(1), "%a %b %d %H:%M")
+                    for b in boots.values():
+                        if b["end"].month == dt.month and b["end"].day == dt.day and b["end"].hour == dt.hour and abs(b["end"].minute - dt.minute) <= 5:
+                            boundaries.append({"boot": b["idx"], "type": "unclean shutdown", "ts": b["end"]})
+                            break
+                except ValueError:
+                    pass
+    
+    # Compositor crashes / OOM kills
+    for f in findings:
+        if f["id"] in {"wayland", "oom"}:
+            for line in f.get("evidence", []):
+                ts = parse_journal_time(line)
+                b = get_boot_for_ts(ts, boots)
+                if b != "unknown" and ts:
+                    boundaries.append({"boot": b, "type": "OOM" if f["id"] == "oom" else "compositor crash", "ts": ts.replace(tzinfo=None)})
+                    
+    # Group into incident windows (collapse boundaries in same boot if < 15 mins)
+    incidents = []
+    for boot_idx, b_data in boots.items():
+        boot_bounds = sorted([bd for bd in boundaries if bd["boot"] == boot_idx], key=lambda x: x["ts"])
+        merged = []
+        for bd in boot_bounds:
+            if not merged:
+                merged.append(bd)
+            elif (bd["ts"] - merged[-1]["ts"]).total_seconds() < 900:
+                # keep latest
+                merged[-1] = bd
+            else:
+                merged.append(bd)
+                
+        if not merged and boot_idx == "0":
+            # Active boot is an incident even without crash
+            merged = [{"boot": "0", "type": "active session", "ts": boots["0"]["end"]}]
+            
+        for idx, bd in enumerate(merged):
+            # Window is bd["ts"] - 15 mins to bd["ts"]
+            w_start = bd["ts"] - timedelta(minutes=15)
+            w_end = bd["ts"] + timedelta(minutes=1)
+            incidents.append({
+                "boot": bd["boot"],
+                "start": w_start,
+                "end": w_end,
+                "boundary": bd["type"],
+                "events": [],
+                "symptoms": {}
+            })
+            
+    # Assign evidence to incidents
+    unattributed = []
+    for f in findings:
+        if f["id"] in {"no_oom", "no_pstore", "corrected_events", "perf_sampling_adjustment"}:
+            continue
+        for line in f.get("evidence", []):
+            ts = parse_journal_time(line)
+            cmd = next((v.get("command", "") for v in checks.values() if v.get("output") and line in v["output"]), "unknown")
+            event = {"finding": f, "line": line, "timestamp": ts.isoformat() if ts else None, "command": cmd}
+            
+            assigned = False
+            if ts:
+                naive_ts = ts.replace(tzinfo=None)
+                # Find incident window
+                for inc in incidents:
+                    if inc["start"] <= naive_ts <= inc["end"]:
+                        inc["events"].append(event)
+                        assigned = True
+                        break
+            if not assigned:
+                # If no timestamp, DO NOT GUESS. Put in unattributed.
+                unattributed.append(event)
+                
+    # Now evaluate each incident
+    report_incidents = []
+    for inc in incidents:
+        if not inc["events"] and inc["boundary"] == "active session":
+            continue
+            
+        symptoms = {}
+        for e in inc["events"]:
+            fid = e["finding"]["id"]
+            if fid not in symptoms:
+                symptoms[fid] = {"finding": e["finding"], "evidence": []}
+            symptoms[fid]["evidence"].append(e)
+            
+        context = {
+            "hard_crash": inc["boundary"] == "unclean shutdown",
+            "has_panic": "kernel_panic" in symptoms,
+            "has_oom": "oom" in symptoms,
+            "has_thermal": "thermal" in symptoms,
+            "has_storage": any(k in {"storage_failure", "filesystem", "system_disk_error"} for k in symptoms),
+        }
+        
+        hypotheses = []
+        if any(k in {"intel_display", "other_gpu", "wayland"} for k in symptoms):
+            score = 0.42
+            supports = ["Graphics/DRM or Wayland errors were recorded near the boundary."]
+            if context["hard_crash"]:
+                score += 0.10
+                supports.append("The session ended in an unclean crash.")
+            hypotheses.append({
+                "title": "Display-stack freeze or GPU hang",
+                "category": "Graphics",
+                "score": score,
+                "confidence": confidence_label(score),
+                "supports": supports,
+                "against": [],
+                "next_test": "Gather next crash log with minimal display configuration.",
+            })
+            
+        if "repeated_pcie_device" in symptoms:
+            score = 0.50
+            supports = ["Repeated PCIe correctable errors were found."]
+            against = ["The logged events were correctable, which rarely cause a hard lockup."]
+            if context["hard_crash"] and not context["has_panic"]:
+                score += 0.10
+            hypotheses.append({
+                "title": "PCIe link/device instability",
+                "category": "PCIe / Network",
+                "score": min(score, 0.9),
+                "confidence": confidence_label(score),
+                "supports": supports,
+                "against": against,
+                "next_test": "Monitor PCIe bus for uncorrectable errors during next crash.",
+            })
+            
+        if context["has_storage"]:
+            score = 0.60
+            supports = ["System storage I/O or filesystem errors occurred."]
+            if context["hard_crash"]:
+                score += 0.20
+            hypotheses.append({
+                "title": "Storage or Filesystem failure",
+                "category": "Storage",
+                "score": min(score, 0.95),
+                "confidence": confidence_label(score),
+                "supports": supports,
+                "against": [],
+                "next_test": "Back up immediately and schedule a long SMART test.",
+            })
+
+        if context["has_oom"]:
+            score = 0.8
+            supports = ["The kernel explicitly killed processes due to out-of-memory."]
+            if context["hard_crash"]:
+                score += 0.10
+            hypotheses.append({
+                "title": "Out-of-memory crash",
+                "category": "Memory",
+                "score": min(score, 0.95),
+                "confidence": confidence_label(score),
+                "supports": supports,
+                "against": [],
+                "next_test": "Enable system canary and monitor memory pressure.",
+            })
+            
+        if context["hard_crash"] and not hypotheses:
+            hypotheses.append({
+                "title": "Unknown Kernel, Firmware or Power Failure",
+                "category": "Firmware",
+                "score": 0.30,
+                "confidence": "low",
+                "supports": ["The system suffered an unclean shutdown (crash)."],
+                "against": [],
+                "next_test": "Enable kdump or netconsole to capture panics.",
+            })
+            
+        hypotheses.sort(key=lambda h: h["score"], reverse=True)
+        best = hypotheses[0] if hypotheses else None
+        
+        unrelated = []
+        best_cat = best["category"] if best else None
+        for fid, item in symptoms.items():
+            f = item["finding"]
+            # Exclude removable devices from causing a system crash
+            if f["id"] in {"removable_drive_error", "unsafe_removal"}:
+                unrelated.append(f["title"] + " (Removable/USB)")
+            elif f["category"] != best_cat and fid not in {"unclean_boot", "no_oom", "no_pstore"}:
+                unrelated.append(f["title"])
+                
+        # confidence explanation
+        if not context["hard_crash"] and best:
+            best["title"] += " (Active Warning, no crash recorded)"
+            best["supports"].append("This boot is currently active or exited cleanly.")
+        conf_exp = f"Ranked {best['confidence']} based on timing and severity." if best else "No evidence."
+                
+        boot_obj = boots.get(inc["boot"], {})
+        report_incidents.append({
+            "boot_id": boot_obj.get("id", "unknown"),
+            "boot_index": inc["boot"],
+            "incident_start": inc["start"].isoformat(),
+            "incident_end": inc["end"].isoformat(),
+            "failure_boundary": inc["boundary"],
+            "timestamped_evidence": [e for e in inc["events"] if e["timestamp"]],
+            "unattributed_evidence": [e for e in unattributed if e["finding"]["id"] in symptoms],
+            "strongest_hypothesis": best["title"] if best else "Unknown",
+            "supporting_evidence": best["supports"] if best else [],
+            "unrelated_warnings": unrelated,
+            "next_step": best["next_test"] if best else "Gather more evidence.",
+            "confidence": best["confidence"] if best else "low",
+            "confidence_explanation": conf_exp,
+            "hypotheses": hypotheses
         })
+        
+    # global unattributed
+    
+    return report_incidents, unattributed
 
-    repeated = next((f for f in findings if f["id"] == "repeated_pcie_device"), None)
-    if repeated:
-        device = repeated.get("devices", [{}])[0]
-        pcie_score = 0.50
-        against = ["The logged events were corrected rather than fatal."]
-        if context["hard_crash"]:
-            pcie_score += 0.05
-        hypotheses.append({
-            "rank": 0,
-            "title": f"PCIe link/device instability: {device.get('likely_role', 'PCIe device')} ({device.get('description', 'unknown device')})",
-            "category": "PCIe / Network",
-            "score": round(pcie_score, 2),
-            "confidence": confidence_label(pcie_score),
-            "supports": [
-                f"Address {device.get('address')} appears to be a {device.get('likely_role', 'PCIe device')} using driver {device.get('driver')} and recorded {device.get('count')} matching bus events.",
-                "The parser matched the PCI address anywhere in the AER line and joined it to lspci.",
-            ],
-            "against": against,
-            "next_test": "Update firmware, reseat/replace the affected adapter or disable its PCIe power saving for an A/B test; use Ethernet temporarily if it is the Wi-Fi card.",
-            "would_confirm": "Errors recur on the same address and stop when the device is removed, replaced or bypassed.",
-            "would_weaken": "The same address remains quiet across repeated crashes while another component records immediate faults.",
-        })
-
-    if context["hard_crash"] and not context["has_panic"]:
-        power_score = 0.30
-        support = ["The journal ended abruptly and no normal shutdown was recorded."]
-        against = ["An abrupt journal ending also occurs during a GPU/kernel deadlock, so this is not specific to power or firmware."]
-        if "No pstore crash records found" in checks.get("pstore", {}).get("output", ""):
-            support.append("No pstore panic/oops record survived the reboot.")
-        hypotheses.append({
-            "rank": 0,
-            "title": "Kernel, firmware, motherboard or power-level lock",
-            "category": "Firmware",
-            "score": power_score,
-            "confidence": confidence_label(power_score),
-            "supports": support,
-            "against": against,
-            "next_test": "Enable kdump, persistent capture and both heartbeats; if it happens again, compare the final canary and desktop-heartbeat times.",
-            "would_confirm": "Both heartbeats stop together with no userspace precursor, or kdump/pstore captures a kernel/firmware fault.",
-            "would_weaken": "The system canary keeps running while only the desktop heartbeat fails.",
-        })
-
-    # Explicitly rank currently unsupported common explanations low.
-    hypotheses.extend([
-        {
-            "rank": 0,
-            "title": "Out-of-memory crash",
-            "category": "Memory",
-            "score": 0.10 if not context["has_oom"] else 0.8,
-            "confidence": "low" if not context["has_oom"] else "high",
-            "supports": ["No supporting OOM signature was found."] if not context["has_oom"] else ["OOM-kill signatures were recorded."],
-            "against": ["The previous boot contained no clear OOM-kill event."] if not context["has_oom"] else [],
-            "next_test": "Keep the canary enabled to preserve memory and PSI pressure immediately before another event.",
-            "would_confirm": "A future event shows severe memory PSI, exhausted swap, or an OOM kill at the crash boundary.",
-            "would_weaken": "Memory pressure remains low immediately before repeated crashes.",
-        },
-        {
-            "rank": 0,
-            "title": "Thermal shutdown",
-            "category": "Thermals",
-            "score": 0.08 if not context["has_thermal"] else 0.8,
-            "confidence": "low" if not context["has_thermal"] else "high",
-            "supports": ["No supporting thermal shutdown signature was found."] if not context["has_thermal"] else ["Thermal protection messages were recorded."],
-            "against": ["The logs did not show a critical temperature or thermal shutdown."] if not context["has_thermal"] else [],
-            "next_test": "Use the canary and a deliberate CPU test while watching sensors, only when interruption is acceptable.",
-            "would_confirm": "Temperatures reach the platform limit or the kernel records throttling/thermal shutdown at the boundary.",
-            "would_weaken": "Temperatures stay well below limits through reproduction attempts.",
-        },
-    ])
-
-    hypotheses.sort(key=numeric_score, reverse=True)
-    for index, item in enumerate(hypotheses, start=1):
-        item["rank"] = index
-    return hypotheses
+def build_overall(incidents):
+    if not incidents:
+        return {"title": "No incidents", "confidence": "low", "summary": "No incidents."}
+    best_inc = incidents[-1]
+    if not best_inc["hypotheses"]:
+        return {"title": "No evidence-backed leading cause yet", "confidence": "low", "summary": "No cause."}
+    top = best_inc["hypotheses"][0]
+    return {
+        "title": top["title"],
+        "confidence": top["confidence"],
+        "summary": f"Leading hypothesis: {top['title']} ({top['confidence']} confidence)."
+    }
 
 
-def category_status(findings: list[dict[str, Any]], checks: dict[str, Any]) -> dict[str, dict[str, str]]:
+def category_status(findings, checks):
     categories = ["Graphics", "Memory", "Storage", "Thermals", "PCIe / Network", "Firmware", "Software"]
     result = {}
     for category in categories:
@@ -857,36 +1014,6 @@ def category_status(findings: list[dict[str, Any]], checks: dict[str, Any]) -> d
                 result[category] = {"status": "not_checked", "label": "Not checked"}
     return result
 
-
-def build_overall(hypotheses: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, str]:
-    if not hypotheses:
-        return {
-            "title": "No leading cause identified",
-            "confidence": "low",
-            "summary": "The scan did not collect enough evidence to rank a likely cause.",
-        }
-    top = hypotheses[0]
-    if numeric_score(top) < 0.25:
-        return {
-            "title": "No evidence-backed leading cause yet",
-            "confidence": "low",
-            "summary": "The scan did not find enough positive evidence to rank a likely cause. Low-scoring alternatives remain listed only as things the current evidence does not support.",
-        }
-    absent = []
-    if not context["has_oom"]:
-        absent.append("no logged OOM event")
-    if not context["has_thermal"]:
-        absent.append("no thermal shutdown")
-    if not context["has_storage"]:
-        absent.append("no clear storage failure")
-    suffix = f" The scan also found {', '.join(absent)}." if absent else ""
-    return {
-        "title": top["title"],
-        "confidence": top["confidence"],
-        "summary": f"Leading hypothesis: {top['title']} ({top['confidence']} confidence).{suffix}",
-    }
-
-
 def collect(mode: str = "quick", baseline_path: str | None = None, progress: Progress | None = None) -> dict[str, Any]:
     if mode not in {"quick", "full"}:
         raise ValueError("mode must be quick or full")
@@ -898,7 +1025,7 @@ def collect(mode: str = "quick", baseline_path: str | None = None, progress: Pro
     findings, context = analyse(checks)
     timeline = build_timeline(checks)
     canary = analyse_canary(checks)
-    hypotheses = build_hypotheses(findings, context, checks, canary)
+    incidents, unattributed = build_incidents(findings, checks)
 
     baseline = load_baseline(baseline_path)
     now = metadata["generated"]
@@ -916,10 +1043,12 @@ def collect(mode: str = "quick", baseline_path: str | None = None, progress: Pro
         "schema": 3,
         "metadata": metadata,
         "counts": counts,
-        "overall": build_overall(hypotheses, context),
+        "incidents": incidents,
+        "overall": build_overall(incidents),
+        "hypotheses": incidents[-1]["hypotheses"] if incidents else [],
         "categories": category_status(findings, checks),
         "findings": findings,
-        "hypotheses": hypotheses,
+        
         "timeline": timeline,
         "canary": canary,
         "checks": checks,
