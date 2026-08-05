@@ -414,9 +414,6 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         ("uncorrectable_hardware", "critical", "Memory", "Uncorrectable hardware error",
          r"uncorrectable.*(?:error|fatal)|hardware error.*uncorrected|mce:.*fatal|machine check.*fatal",
          "An uncorrectable CPU, RAM or PCIe hardware event can directly stop the system.", "high"),
-        ("storage_failure", "critical", "Storage", "Storage failure indicators",
-         r"SMART overall-health.*FAILED|SMART Health Status:.*(?:BAD|FAILED)|critical_warning\s*:\s*[1-9]|medium error|I/O error.*(?:nvme|sd[a-z])",
-         "A drive or storage path reported a potentially serious reliability problem.", "high"),
         ("intel_display", "warning", "Graphics", "Intel graphics/display pipeline errors",
          r"(?:i915|xe\s).*atomic update failure|GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT|(?:i915|xe\s).*GPU HANG|(?:i915|xe\s).*reset",
          "Intel DRM/KWin display failures can cause black screens, compositor stalls or a full freeze.", "moderate"),
@@ -432,9 +429,6 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         ("pcie", "warning", "PCIe / Network", "PCIe bus reliability errors",
          r"pcie bus error|aer:.*error|bad dllp|receiver error",
          "PCIe errors can identify a device, link, power-management or signal-integrity problem.", "moderate"),
-        ("filesystem", "warning", "Storage", "Filesystem or storage-path errors",
-         r"BTRFS.*(?:error|corrupt)|EXT4-fs error|XFS.*corruption|blk_update_request.*I/O error|nvme.*timeout",
-         "The filesystem or storage path recorded errors that warrant backup and testing.", "moderate"),
         ("thermal", "warning", "Thermals", "Thermal protection event",
          r"critical temperature|overheat|thermal.*shutdown|temperature above threshold",
          "A serious overheating or thermal-protection event was recorded.", "high"),
@@ -466,6 +460,71 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
                 "One or more systemd services failed shortly before the crash boundary, which might have triggered downstream faults.",
                 recent_failures[-10:], "this_incident", "moderate"
             ))
+
+    storage_rx = re.compile(r"SMART overall-health.*FAILED|SMART Health Status:.*(?:BAD|FAILED)|critical_warning\s*:\s*[1-9]|medium error|I/O error|BTRFS.*(?:error|corrupt)|EXT4-fs error|XFS.*corruption|blk_update_request.*I/O error|nvme.*timeout|link down|resetting", re.I)
+    disk_events: dict[str, list[str]] = {}
+    for line in evidence_lines(all_text, storage_rx.pattern, 50):
+        dev_match = re.search(r"(?:dev(?:ice)?\s+|FAT-fs\s*\()([a-z0-9]+)\b", line, re.I)
+        dev = dev_match.group(1) if dev_match else "unknown"
+        disk_events.setdefault(dev, []).append(line.strip())
+
+    lsblk_out = checks.get("block", {}).get("output", "")
+    for dev, lines in disk_events.items():
+        base_dev = re.sub(r"p?\d+$", "", dev) if dev.startswith("nvme") else dev.rstrip("0123456789")
+        is_removable = bool(re.search(fr"\b{base_dev}\b.*usb", lsblk_out, re.I) or re.search(fr"\[{base_dev}\].*removable disk", all_text, re.I))
+        has_smart = any(re.search(r"SMART|critical_warning", l, re.I) for l in lines)
+        has_write_err = any(re.search(r"write|WRITE", l, re.I) for l in lines)
+        has_read_err = any(re.search(r"read|READ", l, re.I) for l in lines)
+        has_reset = any(re.search(r"reset|link down|timeout", l, re.I) for l in lines)
+        has_disconnect = is_removable and bool(re.search(r"USB disconnect", all_text, re.I))
+
+        severity = "warning"
+        title = f"Storage errors on {dev}"
+        explanation = f"The storage device {dev} reported errors."
+        
+        err_types = []
+        if has_read_err: err_types.append("read errors")
+        if has_write_err: err_types.append("write errors")
+        if has_reset: err_types.append("link resets or timeouts")
+        if not err_types: err_types.append("I/O or filesystem errors")
+        
+        if is_removable:
+            title = f"Errors on removable device {dev}"
+            explanation = f"A removable device ({dev}) reported {', '.join(err_types)}."
+            if has_disconnect:
+                explanation += " This likely coincides with an unsafe removal or transient connection loss."
+                severity = "info"
+            elif len(lines) == 1:
+                severity = "info"
+            if has_smart:
+                severity = "critical"
+                explanation += " It also reported SMART health failures, indicating hardware degradation."
+        else:
+            if has_smart:
+                severity = "critical"
+                title = f"Active failure on internal disk {dev}"
+                explanation = f"The internal system disk {dev} reported SMART health failures. Immediate backup is recommended."
+            elif len(lines) > 2:
+                severity = "critical"
+                title = f"Repeated errors on internal disk {dev}"
+                explanation = f"The internal disk {dev} is experiencing repeated {', '.join(err_types)}. This indicates a current or repeated risk of data loss. Immediate backup is recommended."
+            else:
+                severity = "warning"
+                title = f"Transient error on internal disk {dev}"
+                explanation = f"The internal disk {dev} logged {', '.join(err_types)}. Backup and filesystem checks are advised, but it may be a single historical event."
+
+        if dev == "unknown":
+            title = "Unidentified storage device errors"
+            explanation = "Storage errors were logged, but the exact physical device could not be identified."
+            severity = "warning"
+            if has_smart:
+                severity = "critical"
+                explanation += " SMART health failures were detected. Immediate backup of important data is recommended."
+
+        findings.append(_make_finding(
+            f"storage_{dev}", severity, "Storage", title, explanation, lines[:10], "historical",
+            "high" if len(lines) > 2 or has_smart else "moderate"
+        ))
 
     inventory = parse_lspci_inventory(checks.get("pci", {}).get("output", ""))
     pcie_hits = extract_pcie_devices(

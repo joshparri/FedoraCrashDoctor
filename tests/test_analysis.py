@@ -121,6 +121,62 @@ class AnalysisTests(unittest.TestCase):
         services = [f for f in findings if f["id"] == "failed_services"]
         self.assertEqual(len(services), 0)
 
+    def test_repeated_system_disk_errors_are_critical(self):
+        checks = {
+            "previous_errors": check("prev", "I/O error on dev nvme0n1\nI/O error on dev nvme0n1\nI/O error on dev nvme0n1"),
+            "block": check("block", "nvme0n1 /dev/nvme0n1 disk 256G nvme"),
+            "boot_history": check("boot", ""), "pstore": check("pstore", ""), "pci": check("pci", ""),
+        }
+        findings, _ = analyse(checks)
+        storage = [f for f in findings if f["id"] == "storage_nvme0n1"]
+        self.assertEqual(len(storage), 1)
+        self.assertEqual(storage[0]["severity"], "critical")
+        self.assertIn("Immediate backup", storage[0]["explanation"])
+
+    def test_single_removable_drive_error_is_info(self):
+        checks = {
+            "previous_errors": check("prev", "I/O error on dev sda1"),
+            "block": check("block", "sda /dev/sda disk 16G usb"),
+            "boot_history": check("boot", ""), "pstore": check("pstore", ""), "pci": check("pci", ""),
+        }
+        findings, _ = analyse(checks)
+        storage = [f for f in findings if f["id"] == "storage_sda1"]
+        self.assertEqual(len(storage), 1)
+        self.assertEqual(storage[0]["severity"], "info")
+
+    def test_unsafe_removal_is_info(self):
+        checks = {
+            "previous_errors": check("prev", "USB disconnect\nI/O error on dev sda1 write"),
+            "block": check("block", "sda /dev/sda disk 16G usb"),
+            "boot_history": check("boot", ""), "pstore": check("pstore", ""), "pci": check("pci", ""),
+        }
+        findings, _ = analyse(checks)
+        storage = [f for f in findings if f["id"] == "storage_sda1"]
+        self.assertEqual(len(storage), 1)
+        self.assertEqual(storage[0]["severity"], "info")
+        self.assertIn("unsafe removal", storage[0]["explanation"])
+
+    def test_smart_failure_is_critical(self):
+        checks = {
+            "previous_errors": check("prev", "SMART overall-health self-assessment test result: FAILED! on dev sda"),
+            "block": check("block", "sda /dev/sda disk 1000G sata"),
+            "boot_history": check("boot", ""), "pstore": check("pstore", ""), "pci": check("pci", ""),
+        }
+        findings, _ = analyse(checks)
+        storage = [f for f in findings if f["id"] == "storage_sda"]
+        self.assertEqual(len(storage), 1)
+        self.assertEqual(storage[0]["severity"], "critical")
+
+    def test_unidentified_device_error(self):
+        checks = {
+            "previous_errors": check("prev", "I/O error occurred"),
+            "boot_history": check("boot", ""), "pstore": check("pstore", ""), "pci": check("pci", ""),
+        }
+        findings, _ = analyse(checks)
+        storage = [f for f in findings if f["id"] == "storage_unknown"]
+        self.assertEqual(len(storage), 1)
+        self.assertEqual(storage[0]["severity"], "warning")
+
 
 if __name__ == "__main__":
     unittest.main()
