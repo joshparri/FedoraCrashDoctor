@@ -28,6 +28,11 @@ It is designed to answer three questions after a crash:
   scan-after-reboot scheduling, and manual verification tracking.
 - Before/after scan comparison highlights findings that disappeared, stayed
   recurring, or newly appeared after a change.
+- **Incident-Clustering Schema**: Crash analysis now explicitly clusters evidence temporally around strict boundaries. Diagnostic data is categorized into:
+  - `incident_evidence`: Timestamped evidence firmly within a failure window (e.g. 15 minutes before an unclean shutdown).
+  - `boot_warnings`: Evidence unambiguously attributed to a known boot session but falling outside a defined crash window.
+  - `unresolved_evidence`: Evidence whose timestamp cannot be safely parsed or attributed to a known boot context (never blindly misattributed).
+- **Refined OOM Terminology**: "Out-of-memory" reporting now differentiates between standard `Out-of-memory events` (a single process kill) and `Probable memory-pressure crashes` (where an OOM kill directly precedes an unclean system shutdown), avoiding false panics over browser OOMs.
 - Plain-English category labels such as **Try display-safe mode** and
   **Check PCIe device** replace vague “needs attention” wording where the
   evidence supports a more specific next move.

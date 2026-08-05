@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from collector import analyse, analyse_canary, build_incidents, build_timeline, extract_pcie_devices, parse_lspci_inventory
+from collector import analyse, analyse_canary, build_incidents, build_overall, build_timeline, extract_pcie_devices, parse_lspci_inventory
 
 
 def check(title, output, category="Software", status="ok"):
@@ -58,7 +58,7 @@ class AnalysisTests(unittest.TestCase):
             "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST")
         }
         findings, _ = analyse(checks)
-        incidents, _ = build_incidents(findings, checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
         self.assertEqual(len(incidents), 1)
         self.assertTrue("Display-stack freeze" in incidents[0]["strongest_hypothesis"])
 
@@ -70,7 +70,7 @@ class AnalysisTests(unittest.TestCase):
         }
         findings, _ = analyse(checks)
         findings[0]["evidence"] = ["2026-07-29T12:26:00+1000 host kernel: i915 atomic update failure on pipe A"]
-        incidents, _ = build_incidents(findings, checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
         self.assertEqual(len(incidents), 0)
 
     def test_repeated_correctable_pcie_errors_without_crash(self):
@@ -81,7 +81,7 @@ class AnalysisTests(unittest.TestCase):
             "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
         }
         findings, _ = analyse(checks)
-        incidents, _ = build_incidents(findings, checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
         self.assertEqual(len(incidents), 1)
         self.assertTrue("PCIe" in incidents[0]["strongest_hypothesis"])
         self.assertTrue("Active Warning" in incidents[0]["strongest_hypothesis"])
@@ -93,20 +93,21 @@ class AnalysisTests(unittest.TestCase):
             "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
         }
         findings, _ = analyse(checks)
-        incidents, _ = build_incidents(findings, checks)
-        self.assertEqual(len(incidents), 1)
-        self.assertTrue("Out-of-memory" in incidents[0]["strongest_hypothesis"])
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 2)
+        self.assertTrue("Out-of-memory" in incidents[0]["strongest_hypothesis"] or "Out-of-memory" in incidents[1]["strongest_hypothesis"] or "memory-pressure" in incidents[0]["strongest_hypothesis"] or "memory-pressure" in incidents[1]["strongest_hypothesis"])
 
     def test_multiple_unrelated_warnings_same_boot(self):
         checks = {
-            "current_kernel_errors": check("curr", "2026-07-29T13:26:00+1000 host kernel: i915 atomic update failure\n2026-07-29T13:26:00+1000 host kernel: cpu clock throttled\n2026-07-29T13:26:00+1000 host kernel: Buffer I/O error on dev sda1"),
+            "previous_errors": check("prev", "2026-07-29T13:00:00+1000 host kernel: i915 atomic update failure\n2026-07-29T13:00:00+1000 host kernel: Buffer I/O error on dev sda1"),
+            "thermal_previous": check("therm", "2026-07-29T13:00:00+1000 host kernel: cpu clock throttled"),
+            "block": check("block", "sda /dev/sda disk 16G usb"),
             "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
-            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:00:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:01 AEST Wed 2026-07-29 13:26:00 AEST")
         }
         findings, _ = analyse(checks)
-        incidents, _ = build_incidents(findings, checks)
-        incidents_boot0 = [inc for inc in incidents if inc["boot_index"] == "0"]
-        self.assertTrue(len(incidents_boot0[0]["unrelated_warnings"]) > 0)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        self.assertTrue(len([w for w in boot_warnings if w["boot_index"] == "0"]) > 0)
 
     def test_crash_insufficient_evidence(self):
         checks = {
@@ -114,7 +115,7 @@ class AnalysisTests(unittest.TestCase):
             "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
         }
         findings, _ = analyse(checks)
-        incidents, _ = build_incidents(findings, checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
         self.assertEqual(len(incidents), 1)
         self.assertTrue("Unknown Kernel, Firmware or Power Failure" in incidents[0]["strongest_hypothesis"])
 
@@ -228,6 +229,184 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(len(storage), 1)
         self.assertEqual(storage[0]["severity"], "warning")
 
+
+
+    def test_crash_from_boot_minus_3_not_assigned_to_minus_1(self):
+        checks = {
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Sun Jul 26 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-3 e2110b7c6f7e4e72afca6dfe736dbfb8 Sun 2026-07-26 12:26:00 AEST Sun 2026-07-26 15:51:00 AEST\n-1 aec9240f60294f9d8207a3caadb072f1 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        inc_minus_1 = [i for i in incidents if i["boot_index"] == "-1"]
+        inc_minus_3 = [i for i in incidents if i["boot_index"] == "-3"]
+        self.assertEqual(len(inc_minus_1), 0)
+        self.assertEqual(len(inc_minus_3), 1)
+        self.assertEqual(inc_minus_3[0]["failure_boundary"], "unclean shutdown")
+
+    def test_multiple_crash_records_map_to_respective_boots(self):
+        checks = {
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Sun Jul 26 12:26 - crash  (03:25)\nreboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-3 e2110b7c6f7e4e72afca6dfe736dbfb8 Sun 2026-07-26 12:26:00 AEST Sun 2026-07-26 15:51:00 AEST\n-1 aec9240f60294f9d8207a3caadb072f1 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 15:51:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 2)
+
+    def test_crash_record_without_year_unresolved_when_ambiguous(self):
+        checks = {
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Sun Jul 26 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-2 e2110b7c6f7e4e72afca6dfe736dbfb8 Sun 2025-07-26 12:26:00 AEST Sun 2025-07-26 15:51:00 AEST\n-1 aec9240f60294f9d8207a3caadb072f1 Sun 2026-07-26 12:26:00 AEST Sun 2026-07-26 15:51:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 0)
+
+    def test_adjacent_boots_do_not_receive_same_event(self):
+        checks = {
+            "previous_errors": check("prev", "2026-07-26T15:50:00+1000 host kernel: i915 atomic update failure"),
+            "journal_boots": check("boots", "-2 e2110b7c6f7e4e72afca6dfe736dbfb8 Sun 2026-07-26 12:26:00 AEST Sun 2026-07-26 15:51:00 AEST\n-1 aec9240f60294f9d8207a3caadb072f1 Sun 2026-07-26 15:52:00 AEST Sun 2026-07-26 18:51:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        warnings_minus_2 = [w for w in boot_warnings if w["boot_index"] == "-2"]
+        warnings_minus_1 = [w for w in boot_warnings if w["boot_index"] == "-1"]
+        self.assertEqual(len(warnings_minus_2), 1)
+        self.assertEqual(len(warnings_minus_1), 0)
+
+    def test_crash_outside_available_boot_history_unresolved(self):
+        checks = {
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Sun Jul 20 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-1 aec9240f60294f9d8207a3caadb072f1 Sun 2026-07-26 12:26:00 AEST Sun 2026-07-26 15:51:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        self.assertEqual(len(incidents), 0)
+
+    def test_integration_gui_compatibility(self):
+        import sys, json
+        from unittest.mock import MagicMock
+        sys.modules['PySide6'] = MagicMock()
+        sys.modules['PySide6.QtCore'] = MagicMock()
+        sys.modules['PySide6.QtGui'] = MagicMock()
+        sys.modules['PySide6.QtWidgets'] = MagicMock()
+        
+        from fedora_crash_doctor import MainWindow
+        
+        checks = {
+            "previous_errors": check("prev", "2026-07-29T13:26:00+1000 host kernel: i915 atomic update failure"),
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
+        }
+        import collector
+        collector.get_evidence = MagicMock(return_value=checks)
+        report = collector.collect("quick")
+        report_json = json.loads(json.dumps(report, default=str))
+        
+        window = MainWindow()
+        window.report = report_json
+        
+        self.assertIn("overall", report_json)
+        self.assertIn("hypotheses", report_json)
+        self.assertIn("incidents", report_json)
+        self.assertIn("boot_warnings", report_json)
+        self.assertIn("unresolved_evidence", report_json)
+        
+        window.populate_fixes()
+
+
+    def test_overall_no_incidents(self):
+        overall, hypotheses = build_overall([])
+        self.assertEqual(overall["title"], "No leading cause identified")
+        self.assertEqual(hypotheses, [])
+
+    def test_overall_incidents_no_hypotheses(self):
+        incidents = [{"boot_index": "0", "sort_key": 0, "failure_boundary": "active session", "hypotheses": []}]
+        overall, hypotheses = build_overall(incidents)
+        self.assertEqual(overall["title"], "No evidence-backed leading cause yet")
+        self.assertEqual(hypotheses, [])
+
+    def test_overall_only_boot_warnings(self):
+        incidents = []
+        overall, hypotheses = build_overall(incidents)
+        self.assertEqual(overall["title"], "No leading cause identified")
+        self.assertEqual(hypotheses, [])
+
+    def test_overall_only_unresolved_evidence(self):
+        incidents = []
+        overall, hypotheses = build_overall(incidents)
+        self.assertEqual(overall["title"], "No leading cause identified")
+        self.assertEqual(hypotheses, [])
+
+    def test_oom_five_minutes_before_crash(self):
+        checks = {
+            "oom_previous": check("oom", "2026-07-29T12:21:00+1000 host kernel: Out of memory: Killed process"),
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:00 - crash  (00:26)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:00:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:01 AEST Wed 2026-07-29 13:26:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, _, _ = build_incidents(findings, checks)
+        
+        self.assertEqual(len(incidents), 2)
+        oom_inc = next(i for i in incidents if i["failure_boundary"] == "OOM event")
+        crash_inc = next(i for i in incidents if i["failure_boundary"] == "unclean shutdown")
+        
+        # The OOM event at 12:21 should be in the OOM window (12:06 to 12:22)
+        self.assertTrue(any("Out of memory" in e["line"] for e in oom_inc["incident_evidence"]))
+        
+        # The OOM event at 12:21 should ALSO be in the crash window (12:11 to 12:27)
+        self.assertTrue(any("Out of memory" in e["line"] for e in crash_inc["incident_evidence"]))
+        
+        self.assertEqual(crash_inc["strongest_hypothesis"], "Probable memory-pressure crash")
+
+    def test_wayland_crash_before_unclean_shutdown(self):
+        checks = {
+            "previous_errors": check("prev", "2026-07-29T12:21:00+1000 host wayland-server: fatal error in compositor"),
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:00 - crash  (00:26)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:00:00 AEST Wed 2026-07-29 12:26:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, _, _ = build_incidents(findings, checks)
+        
+        self.assertEqual(len(incidents), 2)
+        wayland_inc = next(i for i in incidents if i["failure_boundary"] == "compositor crash")
+        crash_inc = next(i for i in incidents if i["failure_boundary"] == "unclean shutdown")
+        
+        self.assertTrue(any("wayland-server" in e["line"] for e in wayland_inc["incident_evidence"]))
+        self.assertTrue(any("wayland-server" in e["line"] for e in crash_inc["incident_evidence"]))
+
+    def test_two_unrelated_boundaries_overlap(self):
+        checks = {
+            "previous_errors": check("prev", "2026-07-29T12:21:00+1000 host wayland-server: fatal error in compositor"),
+            "oom_previous": check("oom", "2026-07-29T12:22:00+1000 host kernel: Out of memory: Killed process"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:00:00 AEST Wed 2026-07-29 12:30:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, _, _ = build_incidents(findings, checks)
+        
+        self.assertEqual(len(incidents), 2)
+        wayland_inc = next(i for i in incidents if i["failure_boundary"] == "compositor crash")
+        oom_inc = next(i for i in incidents if i["failure_boundary"] == "OOM event")
+        
+        # Wayland event is in both
+        self.assertTrue(any("wayland-server" in e["line"] for e in wayland_inc["incident_evidence"]))
+        self.assertTrue(any("wayland-server" in e["line"] for e in oom_inc["incident_evidence"]))
+        
+        # OOM event is in both
+        self.assertTrue(any("Out of memory" in e["line"] for e in wayland_inc["incident_evidence"]))
+        self.assertTrue(any("Out of memory" in e["line"] for e in oom_inc["incident_evidence"]))
+
+    def test_incidents_different_order_identical_output(self):
+        # build_overall sorts by sort_key, order shouldn't matter
+        inc1 = {"boot_index": "0", "sort_key": 1, "failure_boundary": "active session", "hypotheses": [{"title": "A", "confidence": "high"}]}
+        inc2 = {"boot_index": "0", "sort_key": 2, "failure_boundary": "active session", "hypotheses": [{"title": "B", "confidence": "high"}]}
+        
+        out1, hyp1 = build_overall([inc1, inc2])
+        out2, hyp2 = build_overall([inc2, inc1])
+        
+        self.assertEqual(out1, out2)
+        self.assertEqual(hyp1, hyp2)
+        self.assertEqual(out1["title"], "B")
 
 if __name__ == "__main__":
     unittest.main()

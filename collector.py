@@ -719,11 +719,11 @@ def numeric_score(item: dict[str, Any]) -> float:
 
 
 
+
 def parse_boots_from_journal(checks):
     boots = {}
     out = checks.get("journal_boots", {}).get("output", "")
     for line in out.splitlines():
-        # Handle variations in locale/timezone by just extracting the YYYY-MM-DD HH:MM:SS
         import re
         from datetime import datetime
         m = re.match(r"^\s*([-\d]+)\s+([a-f0-9]{32})\s+.*?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", line)
@@ -741,9 +741,14 @@ def get_boot_for_ts(ts, boots):
     if not ts: return "unknown"
     from datetime import timedelta
     naive_ts = ts.replace(tzinfo=None)
+    
+    matches = []
     for b in boots.values():
-        if b["start"] - timedelta(minutes=5) <= naive_ts <= b["end"] + timedelta(minutes=5):
-            return b["idx"]
+        if b["start"] <= naive_ts <= b["end"]:
+            matches.append(b["idx"])
+            
+    if len(matches) == 1:
+        return matches[0]
     return "unknown"
 
 def build_incidents(findings, checks):
@@ -751,38 +756,46 @@ def build_incidents(findings, checks):
     import re
     from datetime import datetime, timedelta
     
-    # 1. Identify failure boundaries
     boundaries = []
     
     # Unclean boots
-    crash_lines = evidence_lines(checks.get("boot_history", {}).get("output", ""), r"\s-crash\s|crash\s+\(", 20)
-    if crash_lines and "-1" in boots:
-        boundaries.append({"boot": "-1", "type": "unclean shutdown", "ts": boots["-1"]["end"]})
-        
     unclean_f = next((f for f in findings if f["id"] == "unclean_boot"), None)
     if unclean_f:
         for line in unclean_f.get("evidence", []):
             m = re.search(r"([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2})\s+-\s+crash", line)
             if m:
+                # Add year dynamically or resolve appropriately. We must not guess if year is missing and ambiguous.
+                # Actually, the string from `last` doesn't have a year.
+                # We can try to match month, day, hour, minute.
+                dt_str = m.group(1)
                 try:
-                    dt = datetime.strptime(m.group(1), "%a %b %d %H:%M")
+                    dt = datetime.strptime(dt_str, "%a %b %d %H:%M")
+                    matched_boots = []
                     for b in boots.values():
-                        if b["end"].month == dt.month and b["end"].day == dt.day and b["end"].hour == dt.hour and abs(b["end"].minute - dt.minute) <= 5:
-                            boundaries.append({"boot": b["idx"], "type": "unclean shutdown", "ts": b["end"]})
-                            break
+                        if b["start"].month == dt.month and b["start"].day == dt.day and b["start"].hour == dt.hour and abs(b["start"].minute - dt.minute) <= 5:
+                            matched_boots.append((b["idx"], b["end"]))
+                    if len(matched_boots) == 1:
+                        boundaries.append({"boot": matched_boots[0][0], "type": "unclean shutdown", "ts": matched_boots[0][1]})
+                    elif len(matched_boots) > 1:
+                        # Ambiguous
+                        pass
                 except ValueError:
                     pass
-    
-    # Compositor crashes / OOM kills
+                    
+    # Other boundaries
     for f in findings:
-        if f["id"] in {"wayland", "oom"}:
+        if f["id"] in {"wayland", "oom", "kernel_panic", "watchdog"}:
             for line in f.get("evidence", []):
                 ts = parse_journal_time(line)
                 b = get_boot_for_ts(ts, boots)
                 if b != "unknown" and ts:
-                    boundaries.append({"boot": b, "type": "OOM" if f["id"] == "oom" else "compositor crash", "ts": ts.replace(tzinfo=None)})
+                    if f["id"] == "oom": b_type = "OOM event"
+                    elif f["id"] == "wayland": b_type = "compositor crash"
+                    elif f["id"] == "kernel_panic": b_type = "kernel panic"
+                    elif f["id"] == "watchdog": b_type = "watchdog lockup"
+                    else: b_type = "unknown"
+                    boundaries.append({"boot": b, "type": b_type, "ts": ts.replace(tzinfo=None)})
                     
-    # Group into incident windows (collapse boundaries in same boot if < 15 mins)
     incidents = []
     for boot_idx, b_data in boots.items():
         boot_bounds = sorted([bd for bd in boundaries if bd["boot"] == boot_idx], key=lambda x: x["ts"])
@@ -790,18 +803,15 @@ def build_incidents(findings, checks):
         for bd in boot_bounds:
             if not merged:
                 merged.append(bd)
-            elif (bd["ts"] - merged[-1]["ts"]).total_seconds() < 900:
-                # keep latest
-                merged[-1] = bd
+            elif bd["type"] == merged[-1]["type"] and (bd["ts"] - merged[-1]["ts"]).total_seconds() < 900:
+                merged[-1] = bd # Keep latest of SAME boundary type
             else:
                 merged.append(bd)
                 
         if not merged and boot_idx == "0":
-            # Active boot is an incident even without crash
             merged = [{"boot": "0", "type": "active session", "ts": boots["0"]["end"]}]
             
-        for idx, bd in enumerate(merged):
-            # Window is bd["ts"] - 15 mins to bd["ts"]
+        for bd in merged:
             w_start = bd["ts"] - timedelta(minutes=15)
             w_end = bd["ts"] + timedelta(minutes=1)
             incidents.append({
@@ -813,8 +823,9 @@ def build_incidents(findings, checks):
                 "symptoms": {}
             })
             
-    # Assign evidence to incidents
-    unattributed = []
+    unresolved_evidence = []
+    boot_warnings = []
+    
     for f in findings:
         if f["id"] in {"no_oom", "no_pstore", "corrected_events", "perf_sampling_adjustment"}:
             continue
@@ -823,20 +834,23 @@ def build_incidents(findings, checks):
             cmd = next((v.get("command", "") for v in checks.values() if v.get("output") and line in v["output"]), "unknown")
             event = {"finding": f, "line": line, "timestamp": ts.isoformat() if ts else None, "command": cmd}
             
-            assigned = False
-            if ts:
-                naive_ts = ts.replace(tzinfo=None)
-                # Find incident window
-                for inc in incidents:
-                    if inc["start"] <= naive_ts <= inc["end"]:
-                        inc["events"].append(event)
-                        assigned = True
-                        break
-            if not assigned:
-                # If no timestamp, DO NOT GUESS. Put in unattributed.
-                unattributed.append(event)
+            b = get_boot_for_ts(ts, boots)
+            
+            if b == "unknown" or not ts:
+                unresolved_evidence.append(event)
+                continue
                 
-    # Now evaluate each incident
+            assigned = False
+            naive_ts = ts.replace(tzinfo=None)
+            for inc in incidents:
+                if inc["boot"] == b and inc["start"] <= naive_ts <= inc["end"]:
+                    inc["events"].append(event)
+                    assigned = True
+            
+            if not assigned:
+                event["boot_index"] = b
+                boot_warnings.append(event)
+                
     report_incidents = []
     for inc in incidents:
         if not inc["events"] and inc["boundary"] == "active session":
@@ -851,21 +865,25 @@ def build_incidents(findings, checks):
             
         context = {
             "hard_crash": inc["boundary"] == "unclean shutdown",
-            "has_panic": "kernel_panic" in symptoms,
-            "has_oom": "oom" in symptoms,
-            "has_thermal": "thermal" in symptoms,
+            "has_panic": inc["boundary"] == "kernel panic",
+            "has_oom": inc["boundary"] == "OOM event",
+            "has_thermal": "thermal_protection" in symptoms,
             "has_storage": any(k in {"storage_failure", "filesystem", "system_disk_error"} for k in symptoms),
         }
         
         hypotheses = []
         if any(k in {"intel_display", "other_gpu", "wayland"} for k in symptoms):
             score = 0.42
+            title = "Display-stack freeze or GPU hang"
             supports = ["Graphics/DRM or Wayland errors were recorded near the boundary."]
             if context["hard_crash"]:
                 score += 0.10
                 supports.append("The session ended in an unclean crash.")
+            if not context["hard_crash"]:
+                title += " (Active Warning, no crash recorded)"
+                supports.append("This boot is currently active or exited cleanly.")
             hypotheses.append({
-                "title": "Display-stack freeze or GPU hang",
+                "title": title,
                 "category": "Graphics",
                 "score": score,
                 "confidence": confidence_label(score),
@@ -876,12 +894,16 @@ def build_incidents(findings, checks):
             
         if "repeated_pcie_device" in symptoms:
             score = 0.50
+            title = "PCIe link/device instability"
             supports = ["Repeated PCIe correctable errors were found."]
             against = ["The logged events were correctable, which rarely cause a hard lockup."]
             if context["hard_crash"] and not context["has_panic"]:
                 score += 0.10
+            if not context["hard_crash"]:
+                title += " (Active Warning, no crash recorded)"
+                supports.append("This boot is currently active or exited cleanly.")
             hypotheses.append({
-                "title": "PCIe link/device instability",
+                "title": title,
                 "category": "PCIe / Network",
                 "score": min(score, 0.9),
                 "confidence": confidence_label(score),
@@ -892,11 +914,15 @@ def build_incidents(findings, checks):
             
         if context["has_storage"]:
             score = 0.60
+            title = "Storage or Filesystem failure"
             supports = ["System storage I/O or filesystem errors occurred."]
             if context["hard_crash"]:
                 score += 0.20
+            if not context["hard_crash"]:
+                title += " (Active Warning, no crash recorded)"
+                supports.append("This boot is currently active or exited cleanly.")
             hypotheses.append({
-                "title": "Storage or Filesystem failure",
+                "title": title,
                 "category": "Storage",
                 "score": min(score, 0.95),
                 "confidence": confidence_label(score),
@@ -905,13 +931,21 @@ def build_incidents(findings, checks):
                 "next_test": "Back up immediately and schedule a long SMART test.",
             })
 
-        if context["has_oom"]:
+        if context["has_oom"] or "oom" in symptoms:
             score = 0.8
-            supports = ["The kernel explicitly killed processes due to out-of-memory."]
             if context["hard_crash"]:
+                title = "Probable memory-pressure crash"
                 score += 0.10
+            elif inc["boundary"] == "OOM event":
+                title = "Out-of-memory event"
+                score = 0.7
+            else:
+                title = "Memory pressure warning"
+                score = 0.6
+                
+            supports = ["The kernel explicitly killed processes due to out-of-memory."]
             hypotheses.append({
-                "title": "Out-of-memory crash",
+                "title": title,
                 "category": "Memory",
                 "score": min(score, 0.95),
                 "confidence": confidence_label(score),
@@ -934,22 +968,8 @@ def build_incidents(findings, checks):
         hypotheses.sort(key=lambda h: h["score"], reverse=True)
         best = hypotheses[0] if hypotheses else None
         
-        unrelated = []
-        best_cat = best["category"] if best else None
-        for fid, item in symptoms.items():
-            f = item["finding"]
-            # Exclude removable devices from causing a system crash
-            if f["id"] in {"removable_drive_error", "unsafe_removal"}:
-                unrelated.append(f["title"] + " (Removable/USB)")
-            elif f["category"] != best_cat and fid not in {"unclean_boot", "no_oom", "no_pstore"}:
-                unrelated.append(f["title"])
-                
-        # confidence explanation
-        if not context["hard_crash"] and best:
-            best["title"] += " (Active Warning, no crash recorded)"
-            best["supports"].append("This boot is currently active or exited cleanly.")
         conf_exp = f"Ranked {best['confidence']} based on timing and severity." if best else "No evidence."
-                
+        
         boot_obj = boots.get(inc["boot"], {})
         report_incidents.append({
             "boot_id": boot_obj.get("id", "unknown"),
@@ -957,33 +977,48 @@ def build_incidents(findings, checks):
             "incident_start": inc["start"].isoformat(),
             "incident_end": inc["end"].isoformat(),
             "failure_boundary": inc["boundary"],
-            "timestamped_evidence": [e for e in inc["events"] if e["timestamp"]],
-            "unattributed_evidence": [e for e in unattributed if e["finding"]["id"] in symptoms],
+            "incident_evidence": [e for e in inc["events"] if e["timestamp"]],
             "strongest_hypothesis": best["title"] if best else "Unknown",
             "supporting_evidence": best["supports"] if best else [],
-            "unrelated_warnings": unrelated,
             "next_step": best["next_test"] if best else "Gather more evidence.",
             "confidence": best["confidence"] if best else "low",
             "confidence_explanation": conf_exp,
-            "hypotheses": hypotheses
+            "hypotheses": hypotheses,
+            "sort_key": inc["end"].timestamp()
         })
         
-    # global unattributed
-    
-    return report_incidents, unattributed
+    return report_incidents, boot_warnings, unresolved_evidence
 
 def build_overall(incidents):
     if not incidents:
-        return {"title": "No incidents", "confidence": "low", "summary": "No incidents."}
-    best_inc = incidents[-1]
-    if not best_inc["hypotheses"]:
-        return {"title": "No evidence-backed leading cause yet", "confidence": "low", "summary": "No cause."}
-    top = best_inc["hypotheses"][0]
+        return {"title": "No leading cause identified", "confidence": "low", "summary": "No incidents."}, []
+        
+    # Sort incidents by time
+    sorted_incidents = sorted(incidents, key=lambda x: x["sort_key"])
+    
+    # 1. Most recent confirmed crash
+    target = None
+    for inc in reversed(sorted_incidents):
+        if inc["failure_boundary"] in {"unclean shutdown", "kernel panic"}:
+            target = inc
+            break
+            
+    # 2. Most recent meaningful active incident
+    if not target:
+        for inc in reversed(sorted_incidents):
+            if inc["hypotheses"]:
+                target = inc
+                break
+                
+    if not target or not target["hypotheses"]:
+        return {"title": "No evidence-backed leading cause yet", "confidence": "low", "summary": "No cause."}, []
+        
+    top = target["hypotheses"][0]
     return {
         "title": top["title"],
         "confidence": top["confidence"],
         "summary": f"Leading hypothesis: {top['title']} ({top['confidence']} confidence)."
-    }
+    }, target["hypotheses"]
 
 
 def category_status(findings, checks):
@@ -1025,7 +1060,8 @@ def collect(mode: str = "quick", baseline_path: str | None = None, progress: Pro
     findings, context = analyse(checks)
     timeline = build_timeline(checks)
     canary = analyse_canary(checks)
-    incidents, unattributed = build_incidents(findings, checks)
+    incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+    overall, hypotheses = build_overall(incidents) if incidents else ({"title": "No leading cause identified", "confidence": "low", "summary": "No incidents."}, [])
 
     baseline = load_baseline(baseline_path)
     now = metadata["generated"]
@@ -1044,8 +1080,10 @@ def collect(mode: str = "quick", baseline_path: str | None = None, progress: Pro
         "metadata": metadata,
         "counts": counts,
         "incidents": incidents,
-        "overall": build_overall(incidents),
-        "hypotheses": incidents[-1]["hypotheses"] if incidents else [],
+        "boot_warnings": boot_warnings,
+        "unresolved_evidence": unresolved,
+        "overall": overall,
+        "hypotheses": hypotheses,
         "categories": category_status(findings, checks),
         "findings": findings,
         
