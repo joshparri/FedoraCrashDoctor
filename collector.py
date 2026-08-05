@@ -423,9 +423,9 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         ("other_gpu", "warning", "Graphics", "GPU reset or timeout",
          r"amdgpu.*(?:reset|timeout|ring.*stalled)|nouveau.*(?:timeout|fault)|nvidia.*Xid|drm.*flip_done timed out",
          "A graphics driver or GPU timeout was recorded.", "moderate"),
-        ("wayland", "warning", "Graphics", "Wayland compositor or session error",
-         r"wayland.*(?:crash|fatal|error|disconnect|terminate)|kwin_wayland.*(?:segfault|core dump|aborted)",
-         "The Wayland display server or compositor reported a crash or disconnection.", "moderate"),
+        ("wayland", "warning", "Graphics", "Wayland compositor or session crash",
+         r"wayland.*(?:crash|fatal|error(?!\s*(?:disconnect|terminate)))|kwin_wayland.*(?:segfault|core dump|aborted)",
+         "The Wayland display server or compositor reported a crash or fatal error.", "moderate"),
         ("oom", "warning", "Memory", "Memory exhaustion",
          r"out of memory|oom-kill|killed process|systemd-oomd.*killed",
          "The machine ran out of usable memory or an OOM service terminated processes.", "high"),
@@ -448,17 +448,24 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         if lines:
             findings.append(_make_finding(fid, severity, category, title, explanation, lines, scope, confidence))
 
-    failed_units_text = checks.get("failed_units", {}).get("output", "")
-    failed_lines = [
-        line.strip() for line in failed_units_text.splitlines()
-        if " failed " in line and not line.startswith("UNIT") and "units listed" not in line
-    ]
-    if failed_lines:
-        findings.append(_make_finding(
-            "failed_services", "warning", "Software", "Failed system services",
-            "One or more systemd services failed to start or crashed.",
-            failed_lines[:10], "this_incident", "high"
-        ))
+    tail_lines = checks.get("previous_boot_tail", {}).get("output", "").splitlines()
+    parsed_tail = [(parse_journal_time(line), line) for line in tail_lines]
+    parsed_tail = [(ts, line) for ts, line in parsed_tail if ts is not None]
+    
+    if parsed_tail:
+        end_time = max(ts for ts, _ in parsed_tail)
+        recent_failures = []
+        for ts, line in parsed_tail:
+            if end_time - ts <= timedelta(minutes=10):
+                if re.search(r"systemd\[\d*\]:.*(?:Failed to start|failed with result|Main process exited, code=(?:exited|dumped), status=(?!0\b))", line, re.I):
+                    recent_failures.append(line.strip())
+        
+        if recent_failures:
+            findings.append(_make_finding(
+                "failed_services", "warning", "Software", "Failed system services near crash",
+                "One or more systemd services failed shortly before the crash boundary, which might have triggered downstream faults.",
+                recent_failures[-10:], "this_incident", "moderate"
+            ))
 
     inventory = parse_lspci_inventory(checks.get("pci", {}).get("output", ""))
     pcie_hits = extract_pcie_devices(

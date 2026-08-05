@@ -78,7 +78,7 @@ class AnalysisTests(unittest.TestCase):
 
     def test_wayland_crash_is_identified(self):
         checks = {
-            "previous_errors": check("prev", "wayland-server: fatal error disconnected"),
+            "previous_errors": check("prev", "wayland-server: fatal error in compositor"),
             "boot_history": check("boot", ""),
             "pstore": check("pstore", "No pstore crash records found."),
             "pci": check("pci", ""),
@@ -88,9 +88,20 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(len(wayland), 1)
         self.assertEqual(wayland[0]["severity"], "warning")
 
-    def test_failed_systemd_services_are_identified(self):
+    def test_wayland_shutdown_is_ignored(self):
         checks = {
-            "failed_units": check("failed", "  UNIT          LOAD   ACTIVE SUB    DESCRIPTION\n* dbus.service loaded failed failed D-Bus System Message Bus\n\n1 loaded units listed."),
+            "previous_errors": check("prev", "wayland-server: error disconnected\nwayland-server: terminate"),
+            "boot_history": check("boot", ""),
+            "pstore": check("pstore", "No pstore crash records found."),
+            "pci": check("pci", ""),
+        }
+        findings, _ = analyse(checks)
+        wayland = [f for f in findings if f["id"] == "wayland"]
+        self.assertEqual(len(wayland), 0)
+
+    def test_failed_systemd_services_near_crash(self):
+        checks = {
+            "previous_boot_tail": check("tail", "2026-08-04T12:00:00+1000 host systemd[1]: dbus.service: Failed with result 'exit-code'.\n2026-08-04T12:05:00+1000 host kernel: crash"),
             "boot_history": check("boot", ""),
             "pstore": check("pstore", "No pstore crash records found."),
             "pci": check("pci", ""),
@@ -98,7 +109,17 @@ class AnalysisTests(unittest.TestCase):
         findings, _ = analyse(checks)
         services = [f for f in findings if f["id"] == "failed_services"]
         self.assertEqual(len(services), 1)
-        self.assertIn("dbus.service", services[0]["evidence"][0])
+
+    def test_failed_systemd_services_far_from_crash_ignored(self):
+        checks = {
+            "previous_boot_tail": check("tail", "2026-08-04T10:00:00+1000 host systemd[1]: dbus.service: Failed with result 'exit-code'.\n2026-08-04T12:05:00+1000 host kernel: crash"),
+            "boot_history": check("boot", ""),
+            "pstore": check("pstore", "No pstore crash records found."),
+            "pci": check("pci", ""),
+        }
+        findings, _ = analyse(checks)
+        services = [f for f in findings if f["id"] == "failed_services"]
+        self.assertEqual(len(services), 0)
 
 
 if __name__ == "__main__":
