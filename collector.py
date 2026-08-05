@@ -289,6 +289,11 @@ def build_tasks(mode: str) -> list[Task]:
         Task("dnf_history", "Recent package transactions", ["dnf", "history", "list"], 45, "Software"),
         Task("rpm_recent", "Recently installed or upgraded packages", "rpm -qa --last | head -140", 35, "Software"),
         Task("selinux_avc", "SELinux denials this boot", "journalctl -b 0 --no-pager -o short-iso-precise | grep -iE 'avc: +denied|SELinux is preventing' | tail -600", 35, "Software"),
+        Task("sysctl_panic", "Panic and lockup settings", ["sysctl", "kernel.panic", "kernel.panic_on_oops", "kernel.softlockup_panic", "kernel.nmi_watchdog", "kernel.hardlockup_panic"], 15, "Software"),
+        Task("kdump_service", "Kdump service status", ["systemctl", "is-active", "kdump"], 10, "Software"),
+        Task("kdump_package", "Kdump package", ["rpm", "-q", "kexec-tools"], 10, "Software"),
+        Task("canary_service", "Canary service status", ["systemctl", "is-active", "fedora-crash-doctor-canary.service"], 10, "Software"),
+        Task("journal_dir", "Journal directory", ["ls", "-ld", "/var/log/journal"], 10, "Software"),
     ]
     if shutil.which("abrt-cli", path=_safe_env()["PATH"]):
         tasks.append(Task("abrt", "ABRT detected problems", ["abrt-cli", "list"], 35, "Software"))
@@ -1049,6 +1054,158 @@ def category_status(findings, checks):
                 result[category] = {"status": "not_checked", "label": "Not checked"}
     return result
 
+
+def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
+    sources = []
+    
+    # 1. Journal
+    journal_out = checks.get("journal_dir", {}).get("output", "")
+    if "No such file or directory" in journal_out or checks.get("journal_dir", {}).get("returncode", 1) != 0:
+        sources.append({
+            "name": "Persistent Journal",
+            "status": "unavailable",
+            "explanation": "Systemd journal is volatile (lost on reboot).",
+            "implications": "Privacy: none. Storage: ~50-200MB. Reboot: required to apply.",
+            "setup": "Run: sudo mkdir -p /var/log/journal && sudo systemd-tmpfiles --create --prefix /var/log/journal && sudo systemctl restart systemd-journald"
+        })
+    else:
+        sources.append({
+            "name": "Persistent Journal",
+            "status": "ready",
+            "explanation": "Systemd journal is persisting logs across reboots.",
+            "implications": "",
+            "setup": ""
+        })
+
+    # 2. pstore
+    pstore_out = checks.get("pstore", {}).get("output", "")
+    if "No pstore crash records found" in pstore_out:
+        # Check if directory exists and is mounted
+        if "No such file or directory" in pstore_out or not pstore_out:
+            sources.append({
+                "name": "EFI pstore",
+                "status": "unavailable",
+                "explanation": "/sys/fs/pstore is not mounted or not supported by firmware.",
+                "implications": "Privacy: kernel memory only. Storage: minimal. Reboot: N/A.",
+                "setup": "Ensure EFI variables are accessible or check motherboard settings."
+            })
+        else:
+            sources.append({
+                "name": "EFI pstore",
+                "status": "ready_empty",
+                "explanation": "/sys/fs/pstore is available but contains no previous crash records.",
+                "implications": "",
+                "setup": ""
+            })
+    else:
+        sources.append({
+            "name": "EFI pstore",
+            "status": "ready",
+            "explanation": "pstore is available and contains crash records.",
+            "implications": "",
+            "setup": ""
+        })
+
+    # 3. sysctls
+    sysctl_out = checks.get("sysctl_panic", {}).get("output", "")
+    ready_sysctls = []
+    unready_sysctls = []
+    if "kernel.panic_on_oops = 1" in sysctl_out:
+        ready_sysctls.append("panic_on_oops")
+    else:
+        unready_sysctls.append("panic_on_oops")
+        
+    if "kernel.softlockup_panic = 1" in sysctl_out:
+        ready_sysctls.append("softlockup_panic")
+    else:
+        unready_sysctls.append("softlockup_panic")
+        
+    if "kernel.nmi_watchdog = 1" in sysctl_out:
+        ready_sysctls.append("nmi_watchdog")
+    else:
+        unready_sysctls.append("nmi_watchdog")
+
+    if not unready_sysctls:
+        sources.append({
+            "name": "Kernel Panic Settings",
+            "status": "ready",
+            "explanation": "Kernel is configured to panic on oops and lockups.",
+            "implications": "",
+            "setup": ""
+        })
+    else:
+        sources.append({
+            "name": "Kernel Panic Settings",
+            "status": "misconfigured",
+            "explanation": f"Missing panic triggers: {', '.join(unready_sysctls)}. Evidence capture may fail on freeze.",
+            "implications": "Privacy: none. Storage: none. Reboot: required to apply.",
+            "setup": "Set sysctls (e.g., kernel.panic_on_oops=1) in /etc/sysctl.d/99-crash-capture.conf and run sysctl -p."
+        })
+
+    # 4. Kdump
+    kdump_pkg = checks.get("kdump_package", {}).get("output", "")
+    kdump_svc = checks.get("kdump_service", {}).get("output", "").strip()
+    
+    if "is not installed" in kdump_pkg or checks.get("kdump_package", {}).get("returncode", 0) != 0:
+        sources.append({
+            "name": "Kdump Infrastructure",
+            "status": "unavailable",
+            "explanation": "Kdump package (kexec-tools) is not installed.",
+            "implications": "Privacy: captures full memory (passwords, encryption keys). Storage: ~100MB-1GB per crash. Reboot: required to allocate memory.",
+            "setup": "Run: sudo dnf install kexec-tools"
+        })
+    elif kdump_svc != "active":
+        sources.append({
+            "name": "Kdump Infrastructure",
+            "status": "misconfigured",
+            "explanation": "Kdump is installed but the service is not active.",
+            "implications": "Privacy: captures full memory (passwords, encryption keys). Storage: ~100MB-1GB per crash. Reboot: required to allocate memory.",
+            "setup": "Run: sudo systemctl enable --now kdump"
+        })
+    else:
+        sources.append({
+            "name": "Kdump Infrastructure",
+            "status": "ready",
+            "explanation": "Kdump is installed and active.",
+            "implications": "",
+            "setup": ""
+        })
+
+    # 5. Canary
+    canary_svc = checks.get("canary_service", {}).get("output", "").strip()
+    if canary_svc != "active":
+        sources.append({
+            "name": "System Canary",
+            "status": "unavailable",
+            "explanation": "The FedoraCrashDoctor canary service is not running.",
+            "implications": "Privacy: none. Storage: minimal (rotated logs). Reboot: N/A.",
+            "setup": "Enable Crash Capture in the FedoraCrashDoctor GUI or run: sudo systemctl enable --now fedora-crash-doctor-canary.service"
+        })
+    else:
+        sources.append({
+            "name": "System Canary",
+            "status": "ready",
+            "explanation": "The canary service is actively running and logging telemetry.",
+            "implications": "",
+            "setup": ""
+        })
+
+    # Recommend next step
+    recommendation = "All capture mechanisms are ready."
+    if next((s for s in sources if s["name"] == "Persistent Journal" and s["status"] != "ready"), None):
+        recommendation = "Enable Persistent Journal to ensure logs are not lost on reboot."
+    elif next((s for s in sources if s["name"] == "System Canary" and s["status"] != "ready"), None):
+        recommendation = "Enable the System Canary to log pre-crash telemetry."
+    elif next((s for s in sources if s["name"] == "Kernel Panic Settings" and s["status"] != "ready"), None):
+        recommendation = "Configure Kernel Panic Settings to force panics on hard lockups."
+    elif next((s for s in sources if s["name"] == "Kdump Infrastructure" and s["status"] != "ready"), None):
+        recommendation = "Install and enable Kdump to capture memory dumps during panics."
+        
+    return {
+        "sources": sources,
+        "recommendation": recommendation
+    }
+
 def collect(mode: str = "quick", baseline_path: str | None = None, progress: Progress | None = None) -> dict[str, Any]:
     if mode not in {"quick", "full"}:
         raise ValueError("mode must be quick or full")
@@ -1085,6 +1242,7 @@ def collect(mode: str = "quick", baseline_path: str | None = None, progress: Pro
         "overall": overall,
         "hypotheses": hypotheses,
         "categories": category_status(findings, checks),
+        "readiness": assess_readiness(checks),
         "findings": findings,
         
         "timeline": timeline,
