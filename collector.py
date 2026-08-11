@@ -298,6 +298,10 @@ def build_tasks(mode: str) -> list[Task]:
         Task("crashkernel_mem", "Crash kernel memory reserved", "grep -i crashkernel /proc/cmdline || true", 10, "Software"),
         Task("kdump_target_space", "Kdump target space", "df -h /var/crash || true", 10, "Software"),
         Task("canary_stat", "Canary heartbeat", "stat -c %Y /var/log/fedora-crash-doctor/canary.log || echo 0", 10, "Software"),
+        Task("kexec_loaded", "Crash kernel loaded", ["cat", "/sys/kernel/kexec_crash_loaded"], 10, "Software"),
+        Task("crashkernel_mem", "Crash kernel memory reserved", "grep -i crashkernel /proc/cmdline || true", 10, "Software"),
+        Task("kdump_target_space", "Kdump target space", "df -h /var/crash || true", 10, "Software"),
+        Task("canary_stat", "Canary heartbeat", "stat -c %Y /var/log/fedora-crash-doctor/canary.log || echo 0", 10, "Software"),
     ]
     if shutil.which("abrt-cli", path=_safe_env()["PATH"]):
         tasks.append(Task("abrt", "ABRT detected problems", ["abrt-cli", "list"], 35, "Software"))
@@ -641,7 +645,7 @@ def build_timeline(checks: dict[str, Any]) -> list[dict[str, Any]]:
         ("PCIe / Network", r"pcie bus error|aer:|bad dllp|receiver error|failed to resolve|NetworkManager"),
         ("Thermals", r"thermal|overheat|throttl|critical temperature"),
         ("Storage", r"btrfs.*error|nvme.*(?:error|timeout)|I/O error|smart"),
-        ("Software", r"segfault|core dump|watchdog|panic|wireplumber|pipewire|chrome"),
+        ("Software", r"segfault|core dump|watchdog|kernel panic|not syncing|wireplumber|pipewire|chrome"),
     ]
     events: list[dict[str, Any]] = []
     seen: set[str] = set()
