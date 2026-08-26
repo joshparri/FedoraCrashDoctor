@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 3.2.0-dev — Unreleased
+- Hardened boot boundary logic to detect clean `systemd-shutdown` sequences and ignore historical crash artifacts.
+- Implemented shutdown-context suppression window to ignore Wayland/Plasma teardown noise during clean reboots.
+- Updated Wayland compositor regex to safely ignore `xkbcomp` and portal registration teardown errors.
+- Removed dead `build_rpm` action from the privileged broker helper to reduce attack surface.
 
 - Added `HISTORY.md` with the full Fedora/Linux crash and freeze master record,
   including diagnosis rankings, chronology, recovery procedure, and current

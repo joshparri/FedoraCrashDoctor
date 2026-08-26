@@ -322,6 +322,7 @@ def build_tasks(mode: str) -> list[Task]:
         Task("kernel_cmdline", "Kernel command line", ["cat", "/proc/cmdline"], 10, "Software"),
         Task("kernel_taint", "Kernel taint state", ["cat", "/proc/sys/kernel/tainted"], 10, "Software"),
         Task("modules", "Loaded kernel modules", ["lsmod"], 20, "Software"),
+        Task("display_current", "Graphics/display errors in the current boot", "journalctl -b 0 --no-pager -o short-iso-precise | grep -iE 'i915|xe |amdgpu|nouveau|nvidia|drm|gpu hang|gpu reset|atomic update failure|framebuffer|flip_done|fence timeout|context provider|kwin' | tail -1800", 60, "Graphics"),
         Task("display_previous", "Graphics/display errors in the previous boot", "journalctl -b -1 --no-pager -o short-iso-precise | grep -iE 'i915|xe |amdgpu|nouveau|nvidia|drm|gpu hang|gpu reset|atomic update failure|framebuffer|flip_done|fence timeout|context provider|kwin' | tail -1800", 60, "Graphics"),
         Task("display_history", "Graphics/display errors across 14 days", "journalctl --since '14 days ago' -k --no-pager -o short-iso-precise | grep -iE 'i915|xe |amdgpu|nouveau|nvidia|drm|gpu hang|gpu reset|atomic update failure|framebuffer|flip_done|fence timeout' | tail -2200", 70, "Graphics"),
         Task("hardware_errors_previous", "Hardware and PCIe errors in the previous boot", "journalctl -b -1 -k --no-pager -o short-iso-precise | grep -iE 'hardware error|machine check|mce:|edac|aer:|pcie bus error|correctable|uncorrectable|bad dllp|poison' | tail -1500", 55, "PCIe / Network"),
@@ -464,7 +465,8 @@ def _make_finding(
 def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     prev = "\n".join(checks.get(k, {}).get("output", "") for k in (
         "previous_errors", "previous_kernel_tail", "previous_boot_tail",
-        "display_previous", "hardware_errors_previous", "oom_previous", "thermal_previous"
+        "display_previous", "hardware_errors_previous", "oom_previous", "thermal_previous",
+        "current_kernel_errors", "display_current"
     ))
     history = "\n".join(checks.get(k, {}).get("output", "") for k in (
         "display_history", "hardware_errors_history", "oom_history", "interrupt_latency"
@@ -486,7 +488,7 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
          r"amdgpu.*(?:reset|timeout|ring.*stalled)|nouveau.*(?:timeout|fault)|nvidia.*Xid|drm.*flip_done timed out",
          "A graphics driver or GPU timeout was recorded.", "moderate"),
         ("wayland", "warning", "Graphics", "Wayland compositor or session crash",
-         r"wayland.*(?:crash|fatal|error(?!\s*(?:disconnect|terminate|.*portal)))(?<!not fatal)|kwin_wayland.*(?:segfault|core dump|aborted)",
+         r"(?i)(?!.*not fatal)(?!.*portal.*error)(?:wayland.*(?:crash|fatal|error(?!\s*(?:disconnect|terminate)))|kwin_wayland.*(?:segfault|core dump|aborted))",
          "The Wayland display server or compositor reported a crash or fatal error.", "moderate"),
         ("oom", "warning", "Memory", "Memory exhaustion",
          r"out of memory|oom-kill|killed process|systemd-oomd.*killed",
@@ -1225,17 +1227,17 @@ def build_overall(incidents, boot_warnings=None):
     # Sort incidents by time
     sorted_incidents = sorted(incidents, key=lambda x: x["sort_key"])
 
-    # 1. Most recent confirmed crash
+    # 1. Most recent confirmed crash (recent boots only)
     target = None
     for inc in reversed(sorted_incidents):
-        if inc["failure_boundary"] in {"unclean shutdown", "kernel panic"}:
+        if inc.get("boot_index") in {"0", "-1"} and inc.get("failure_boundary") in {"unclean shutdown", "kernel panic"}:
             target = inc
             break
 
-    # 2. Most recent meaningful active incident
+    # 2. Most recent meaningful active incident (recent boots only)
     if not target:
         for inc in reversed(sorted_incidents):
-            if inc["hypotheses"]:
+            if inc.get("boot_index") in {"0", "-1"} and inc.get("hypotheses"):
                 target = inc
                 break
 
