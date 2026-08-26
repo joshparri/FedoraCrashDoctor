@@ -105,4 +105,4 @@ Generated: 2026-08-26T12:51:47+10:00
   - Internal NVMe SMART reports `0` media errors, `30%` used, and `0` critical warnings.
   - kdump and persistent journal are active and operational.
 - Recommended action:
-  - Continue normal operation. The internal storage is healthy and properly configured. USB-based I/O errors are confirmed to be external device faults.
+  - Current NVMe SMART and Btrfs checks show no detected media/filesystem errors. Historical evidence strongly associates the previously observed I/O faults with external USB storage, but does not prove every historical I/O error was external.

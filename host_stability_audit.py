@@ -138,24 +138,36 @@ def audit() -> dict[str, Any]:
     pressure_app = False
     pressure_bg = False
     app_limit = ""
+    bg_limit = ""
 
     if oomctl["status"] == "ok":
         output = oomctl["output"]
-        parts = output.split("Memory Pressure Monitored CGroups:")
-        swap_section = parts[0]
-        pressure_section = parts[1] if len(parts) > 1 else ""
+        swap_section = ""
+        pressure_section = ""
+
+        if "Memory Pressure Monitored CGroups:" in output:
+            before_pressure, pressure_section = output.split("Memory Pressure Monitored CGroups:", 1)
+            if "Swap Monitored CGroups:" in before_pressure:
+                swap_section = before_pressure.split("Swap Monitored CGroups:", 1)[1]
+        else:
+            if "Swap Monitored CGroups:" in output:
+                swap_section = output.split("Swap Monitored CGroups:", 1)[1]
 
         swap_app = "app.slice" in swap_section
         swap_bg = "background.slice" in swap_section
         pressure_app = "app.slice" in pressure_section
         pressure_bg = "background.slice" in pressure_section
 
-        m = re.search(r"app\.slice\n\s+Memory Pressure Limit: (\d+\.\d+%)", pressure_section)
-        if m:
-            app_limit = m.group(1)
+        m_app = re.search(r"app\.slice\n\s+Memory Pressure Limit: (\d+\.\d+%)", pressure_section)
+        if m_app:
+            app_limit = m_app.group(1)
+
+        m_bg = re.search(r"background\.slice\n\s+Memory Pressure Limit: (\d+\.\d+%)", pressure_section)
+        if m_bg:
+            bg_limit = m_bg.group(1)
 
     if oomd["active"] == "active" and oomd["enabled"] == "enabled":
-        if swap_app and swap_bg and pressure_app and pressure_bg and app_limit == "50.00%":
+        if swap_app and swap_bg and pressure_app and pressure_bg and app_limit == "50.00%" and bg_limit == "50.00%":
             issues.append(issue(
                 "memory",
                 "systemd-oomd is active and monitoring workloads",
@@ -163,7 +175,7 @@ def audit() -> dict[str, Any]:
                 [
                     f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}",
                     "oomctl confirms swap monitoring on app.slice and background.slice.",
-                    f"oomctl confirms memory pressure monitoring on app.slice at {app_limit}."
+                    f"oomctl confirms memory pressure monitoring on app.slice at {app_limit} and background.slice at {bg_limit}."
                 ],
                 "Keep systemd-oomd enabled to protect the session from runaway applications.",
             ))
@@ -176,6 +188,8 @@ def audit() -> dict[str, Any]:
                     f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}",
                     f"app.slice swap monitored: {swap_app}",
                     f"app.slice pressure monitored: {pressure_app} (limit: {app_limit or 'unknown'})",
+                    f"background.slice swap monitored: {swap_bg}",
+                    f"background.slice pressure monitored: {pressure_bg} (limit: {bg_limit or 'unknown'})",
                 ],
                 "Configure systemd-oomd to monitor swap and memory pressure on app.slice and background.slice at 50% limit.",
             ))
