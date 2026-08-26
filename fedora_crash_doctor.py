@@ -933,9 +933,9 @@ class MainWindow(QMainWindow):
         self.canary_label.setText(canary.get("interpretation", "No canary interpretation."))
         samples = canary.get("samples", [])[-120:]
         self.canary_chart.set_series([
-            ("CPU PSI", [float(x.get("psi_cpu_some_avg10", 0) or 0) for x in samples], QColor("#7f56d9")),
-            ("Memory PSI", [float(x.get("psi_memory_some_avg10", 0) or 0) for x in samples], QColor("#d92d20")),
-            ("I/O PSI", [float(x.get("psi_io_some_avg10", 0) or 0) for x in samples], QColor("#1570ef")),
+            ("CPU PSI", [float(x.get("psi_cpu", {}).get("some_avg10", 0) or 0) for x in samples], QColor("#7f56d9")),
+            ("Memory PSI", [float(x.get("psi_mem", {}).get("some_avg10", 0) or 0) for x in samples], QColor("#d92d20")),
+            ("I/O PSI", [float(x.get("psi_io", {}).get("some_avg10", 0) or 0) for x in samples], QColor("#1570ef")),
         ])
         self.smart_device.clear(); self.smart_device.addItems(self.report.get("test_targets", {}).get("smart_devices", []))
         self.update_verification_label()

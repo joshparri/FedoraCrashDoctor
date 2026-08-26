@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.2.1 — 2026-08-27
+- Fixed autoscan boot boundary to correctly inspect only the immediately preceding boot.
+- Ensured dynamically generated storage (`storage_*`) and thermal (`thermal`) finding IDs contribute correctly to incident hypotheses.
+- Updated GUI to correctly visualize nested PSI metrics from the canary schema.
+- Made systemd-oomd audit compatible with flexible memory pressure configurations.
+- Implemented structured journal source attribution (enforcing `_COMM` and `SYSLOG_IDENTIFIER` checks) to prevent unprivileged log-spoofing.
+- Expanded automated regression suite (`tests/test_analysis.py`, `tests/test_autoscan.py`).
+
 ## 3.2.0 — 2026-08-27
 - Hardened boot boundary logic to detect clean `systemd-shutdown` sequences and ignore historical crash artifacts.
 - Implemented shutdown-context suppression window to ignore Wayland/Plasma teardown noise during clean reboots.

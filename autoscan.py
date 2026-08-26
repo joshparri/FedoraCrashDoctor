@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
-from collector import collect  # noqa: E402
+from collector import collect, previous_boot_ended_uncleanly  # noqa: E402
 
 CONFIG = Path("/etc/fedora-crash-doctor/owner.json")
 STATE = Path("/var/lib/fedora-crash-doctor")
@@ -28,16 +28,10 @@ def run(args: list[str]) -> str:
         return ""
 
 
-def unclean_previous_boot() -> bool:
-    history = run(["last", "-x", "-n", "30"])
-    if re.search(r"\s-crash\s|\bcrash\s+\(", history):
-        return True
-    current = run(["journalctl", "-b", "0", "--no-pager", "-n", "500"])
-    return bool(re.search(r"uncleanly shut down|journal.*corrupt", current, re.I))
-
 
 def main() -> int:
-    if os.geteuid() != 0 or not CONFIG.exists() or not unclean_previous_boot():
+    unclean, boot_id = previous_boot_ended_uncleanly()
+    if os.geteuid() != 0 or not CONFIG.exists() or not unclean or not boot_id:
         return 0
     try:
         owner = json.loads(CONFIG.read_text())
@@ -53,8 +47,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     os.chown(out_dir, uid, gid)
     os.chmod(out_dir, 0o700)
-    output = out_dir / "latest.json"
-    tmp = out_dir / ".latest.json.tmp"
+    output = out_dir / f"{boot_id}.json"
+    tmp = out_dir / f".{boot_id}.json.tmp"
     tmp.write_text(json.dumps(report, ensure_ascii=False))
     os.chown(tmp, uid, gid)
     os.chmod(tmp, 0o600)

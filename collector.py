@@ -322,14 +322,14 @@ def build_tasks(mode: str) -> list[Task]:
         Task("kernel_cmdline", "Kernel command line", ["cat", "/proc/cmdline"], 10, "Software"),
         Task("kernel_taint", "Kernel taint state", ["cat", "/proc/sys/kernel/tainted"], 10, "Software"),
         Task("modules", "Loaded kernel modules", ["lsmod"], 20, "Software"),
-        Task("display_current", "Graphics/display errors in the current boot", "journalctl -b 0 --no-pager -o short-iso-precise | grep -iE 'i915|xe |amdgpu|nouveau|nvidia|drm|gpu hang|gpu reset|atomic update failure|framebuffer|flip_done|fence timeout|context provider|kwin' | tail -1800", 60, "Graphics"),
-        Task("display_previous", "Graphics/display errors in the previous boot", "journalctl -b -1 --no-pager -o short-iso-precise | grep -iE 'i915|xe |amdgpu|nouveau|nvidia|drm|gpu hang|gpu reset|atomic update failure|framebuffer|flip_done|fence timeout|context provider|kwin' | tail -1800", 60, "Graphics"),
+        Task("display_current", "Graphics/display errors in the current boot", "journalctl -b 0 --no-pager -o short-iso-precise SYSLOG_IDENTIFIER=kernel + _COMM=kwin_wayland + _COMM=kwin_x11 + _COMM=kwin_wayland_wrapper + _COMM=plasmashell + _COMM=Xorg + _COMM=gnome-shell | grep -iE 'i915|xe |amdgpu|nouveau|nvidia|drm|gpu hang|gpu reset|atomic update failure|framebuffer|flip_done|fence timeout|context provider|kwin' | tail -1800", 60, "Graphics"),
+        Task("display_previous", "Graphics/display errors in the previous boot", "journalctl -b -1 --no-pager -o short-iso-precise SYSLOG_IDENTIFIER=kernel + _COMM=kwin_wayland + _COMM=kwin_x11 + _COMM=kwin_wayland_wrapper + _COMM=plasmashell + _COMM=Xorg + _COMM=gnome-shell | grep -iE 'i915|xe |amdgpu|nouveau|nvidia|drm|gpu hang|gpu reset|atomic update failure|framebuffer|flip_done|fence timeout|context provider|kwin' | tail -1800", 60, "Graphics"),
         Task("display_history", "Graphics/display errors across 14 days", "journalctl --since '14 days ago' -k --no-pager -o short-iso-precise | grep -iE 'i915|xe |amdgpu|nouveau|nvidia|drm|gpu hang|gpu reset|atomic update failure|framebuffer|flip_done|fence timeout' | tail -2200", 70, "Graphics"),
         Task("hardware_errors_previous", "Hardware and PCIe errors in the previous boot", "journalctl -b -1 -k --no-pager -o short-iso-precise | grep -iE 'hardware error|machine check|mce:|edac|aer:|pcie bus error|correctable|uncorrectable|bad dllp|poison' | tail -1500", 55, "PCIe / Network"),
         Task("hardware_errors_history", "Hardware and PCIe errors across 30 days", "journalctl --since '30 days ago' -k --no-pager -o short-iso-precise | grep -iE 'hardware error|machine check|mce:|edac|aer:|pcie bus error|correctable|uncorrectable|bad dllp|poison' | tail -2200", 70, "PCIe / Network"),
         Task("rasdaemon_status", "RAS daemon status", ["systemctl", "status", "rasdaemon.service", "--no-pager"], 20, "Memory"),
-        Task("oom_previous", "Memory exhaustion in the previous boot", "journalctl -b -1 --no-pager -o short-iso-precise | grep -iE 'out of memory|oom-kill|killed process|systemd-oomd.*killed' | tail -800", 50, "Memory"),
-        Task("oom_history", "Memory exhaustion across 30 days", "journalctl --since '30 days ago' --no-pager -o short-iso-precise | grep -iE 'out of memory|oom-kill|killed process|systemd-oomd.*killed' | tail -1200", 60, "Memory"),
+        Task("oom_previous", "Memory exhaustion in the previous boot", "journalctl -b -1 --no-pager -o short-iso-precise SYSLOG_IDENTIFIER=kernel + _COMM=systemd-oomd | grep -iE 'out of memory|oom-kill|killed process|systemd-oomd.*killed' | tail -800", 50, "Memory"),
+        Task("oom_history", "Memory exhaustion across 30 days", "journalctl --since '30 days ago' --no-pager -o short-iso-precise SYSLOG_IDENTIFIER=kernel + _COMM=systemd-oomd | grep -iE 'out of memory|oom-kill|killed process|systemd-oomd.*killed' | tail -1200", 60, "Memory"),
         Task("thermal_previous", "Thermal events in the previous boot", "journalctl -b -1 -k --no-pager -o short-iso-precise | grep -iE 'thermal|overheat|critical temperature|throttl' | tail -800", 45, "Thermals"),
         Task("interrupt_latency", "Perf sampling-rate adjustment messages", "journalctl --since '30 days ago' -k --no-pager -o short-iso-precise | grep -iE 'perf: interrupt took too long|perf: interrupt.*lowering.*sample_rate' | tail -500", 45, "Software"),
         Task("rpm_kernel_graphics", "Installed kernel, graphics and desktop packages", "rpm -qa | grep -E '^(kernel|mesa|linux-firmware|kwin|kscreen|plasma|google-chrome|pipewire|wireplumber)' | sort", 35, "Software"),
@@ -682,8 +682,8 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         "hard_crash": bool(crash_lines),
         "has_gpu_errors": any(f["id"] in {"intel_display", "other_gpu", "wayland"} for f in findings),
         "has_oom": any(f["id"] == "oom" for f in findings),
-        "has_thermal": any(f["id"] == "thermal" for f in findings),
-        "has_storage": any(f["id"] in {"storage_failure", "filesystem"} for f in findings),
+        "has_thermal": any(f["id"].startswith("thermal") for f in findings),
+        "has_storage": any(f["id"].startswith("storage_") for f in findings),
         "has_panic": any(f["id"] == "kernel_panic" for f in findings),
     }
     is_clean_shutdown = False
@@ -1095,8 +1095,8 @@ def build_incidents(findings, checks):
             "hard_crash": inc["boundary"] == "unclean shutdown",
             "has_panic": inc["boundary"] == "kernel panic",
             "has_oom": inc["boundary"] == "OOM event",
-            "has_thermal": "thermal_protection" in symptoms,
-            "has_storage": any(k in {"storage_failure", "filesystem", "system_disk_error"} for k in symptoms),
+            "has_thermal": any(k.startswith("thermal") for k in symptoms),
+            "has_storage": any(k.startswith("storage_") for k in symptoms),
         }
 
         hypotheses = []
@@ -1134,6 +1134,23 @@ def build_incidents(findings, checks):
                 "supports": ["Memory pressure is typically driven by user workloads like Chrome, VS Code, or Electron apps."],
                 "against": [],
                 "next_test": "Review 'Why did memory fill?' report for top memory growers.",
+            })
+
+        # Thermal events
+        if context["has_thermal"]:
+            score = 0.8
+            title = "Thermal shutdown or severe throttling"
+            if not context["hard_crash"]:
+                title += " (Active Warning, no crash recorded)"
+            supports = ["Critical temperature or thermal events were logged near the boundary."]
+            hypotheses.append({
+                "title": title,
+                "category": "Thermals",
+                "score": score,
+                "confidence": confidence_label(score),
+                "supports": supports,
+                "against": [],
+                "next_test": "Check cooling/fans and monitor thermals under load.",
             })
 
         # Display-stack freeze
@@ -1549,6 +1566,21 @@ def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
         "sources": sources,
         "recommendation": recommendation
     }
+def previous_boot_ended_uncleanly() -> tuple[bool, str | None]:
+    import subprocess, re
+    try:
+        boots = subprocess.run(["journalctl", "--list-boots", "--no-pager"], text=True, stdout=subprocess.PIPE, timeout=10).stdout
+        m = re.search(r"^\s*-1\s+([a-f0-9]{32})", boots, re.MULTILINE)
+        if not m:
+            return False, None
+        boot_id = m.group(1)
+        tail = subprocess.run(["journalctl", "-b", "-1", "-n", "100", "--no-pager"], text=True, stdout=subprocess.PIPE, timeout=10).stdout
+        clean = bool(re.search(r"systemd-shutdown\[\d+\]:|systemd\[\d+\]: Shutting down\.|Reached target.*(?:System Shutdown|System Reboot)", tail, re.I))
+        return not clean, boot_id
+    except Exception:
+        return False, None
+
+
 def collect(
     mode: str = "quick",
     baseline_path: str | None = None,
@@ -1584,6 +1616,8 @@ def collect(
         "warning": sum(f["severity"] == "warning" for f in findings),
         "info": sum(f["severity"] == "info" for f in findings),
     }
+
+
     report = {
         "schema": 3,
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -1615,6 +1649,8 @@ def collect(
             "Ranked hypotheses are evidence-weighted explanations, not certainty or a substitute for hardware service.",
         ],
     }
+
+
     if runner.cancelled:
         report["partial"] = True
         report["cancelled"] = True

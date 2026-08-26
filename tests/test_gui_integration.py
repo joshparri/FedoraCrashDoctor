@@ -52,6 +52,36 @@ class RealGuiIntegrationTests(unittest.TestCase):
             window.populate_checks()
         except Exception as e:
             self.fail(f"GUI population failed with exception: {e}")
+
+    def test_psi_graph_reads_nested_schema(self):
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            self.skipTest("Requires QT_QPA_PLATFORM=offscreen")
             
+        from PySide6.QtWidgets import QApplication
+        from fedora_crash_doctor import MainWindow
+        
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+            
+        window = MainWindow()
+        window.report = {
+            "canary": {
+                "samples": [
+                    {
+                        "psi_cpu": {"some_avg10": 1.5},
+                        "psi_mem": {"some_avg10": 2.5},
+                        "psi_io": {"some_avg10": 3.5}
+                    }
+                ]
+            }
+        }
+        window.load_report()
+        # Verify the chart series were populated correctly
+        series = window.canary_chart.series
+        self.assertEqual(series[0][1][0], 1.5)  # CPU
+        self.assertEqual(series[1][1][0], 2.5)  # Mem
+        self.assertEqual(series[2][1][0], 3.5)  # IO
+
 if __name__ == "__main__":
     unittest.main()

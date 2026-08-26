@@ -150,6 +150,42 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(len(incidents), 1)
         self.assertTrue("Unknown Kernel, Firmware or Power Failure" in incidents[0]["strongest_hypothesis"])
 
+    def test_storage_finding_dynamically_assigned(self):
+        checks = {
+            "smart_tests": check("smart", "dummy"),
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 15:52:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 15:53:00 AEST Wed 2026-07-29 15:55:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        findings.append({"id": "storage_nvme0n1", "title": "Storage error", "category": "Storage", "severity": "critical", "evidence": ["2026-07-29T15:50:00+1000 host kernel: nvme0n1 error"], "boot_index": "-1"})
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        self.assertTrue("Storage" in incidents[0]["strongest_hypothesis"])
+
+    def test_thermal_finding_dynamically_assigned(self):
+        checks = {
+            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
+            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 15:52:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 15:53:00 AEST Wed 2026-07-29 15:55:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        findings.append({"id": "thermal", "title": "Thermal protection", "category": "Thermals", "severity": "critical", "evidence": ["2026-07-29T15:50:00+1000 host kernel: critical temperature reached"], "boot_index": "-1"})
+        incidents, boot_warnings, unresolved = build_incidents(findings, checks)
+        self.assertTrue("Thermal" in incidents[0]["strongest_hypothesis"])
+
+    def test_tasks_use_structured_metadata_to_prevent_spoofing(self):
+        tasks = build_tasks("quick")
+        for name in ["display_current", "display_previous"]:
+            task = next(t for t in tasks if t.key == name)
+            self.assertTrue("SYSLOG_IDENTIFIER=kernel" in task.command)
+            self.assertTrue("+ _COMM=kwin_wayland" in task.command)
+            self.assertTrue("+ _COMM=kwin_x11" in task.command)
+        for name in ["oom_previous", "oom_history"]:
+            task = next(t for t in tasks if t.key == name)
+            self.assertTrue("SYSLOG_IDENTIFIER=kernel" in task.command)
+            self.assertTrue("+ _COMM=systemd-oomd" in task.command)
+        for name in ["hardware_errors_previous", "hardware_errors_history", "thermal_previous"]:
+            task = next(t for t in tasks if t.key == name)
+            self.assertTrue("-k" in task.command)
+
     def test_canary_handles_null_desktop_heartbeat_age(self):
         checks = {
             "canary_log": check("canary", '{"ts":"now","desktop_heartbeat_age_s":null,"kwin_ok":null}\n')

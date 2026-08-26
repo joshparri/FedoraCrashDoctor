@@ -167,7 +167,7 @@ def audit() -> dict[str, Any]:
             bg_limit = m_bg.group(1)
 
     if oomd["active"] == "active" and oomd["enabled"] == "enabled":
-        if swap_app and swap_bg and pressure_app and pressure_bg and app_limit == "50.00%" and bg_limit == "50.00%":
+        if swap_app and swap_bg and pressure_app and pressure_bg:
             issues.append(issue(
                 "memory",
                 "systemd-oomd is active and monitoring workloads",
@@ -175,9 +175,10 @@ def audit() -> dict[str, Any]:
                 [
                     f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}",
                     "oomctl confirms swap monitoring on app.slice and background.slice.",
-                    f"oomctl confirms memory pressure monitoring on app.slice at {app_limit} and background.slice at {bg_limit}."
+                    f"oomctl confirms memory pressure monitoring on app.slice (limit: {app_limit or 'unknown'}) and background.slice (limit: {bg_limit or 'unknown'}).",
+                    "Fedora defaults and custom overrides are combined to produce these effective limits."
                 ],
-                "Keep systemd-oomd enabled to protect the session from runaway applications.",
+                "Monitor real freeze history to determine whether the effective thresholds should be adjusted.",
             ))
         else:
             issues.append(issue(
@@ -191,7 +192,7 @@ def audit() -> dict[str, Any]:
                     f"background.slice swap monitored: {swap_bg}",
                     f"background.slice pressure monitored: {pressure_bg} (limit: {bg_limit or 'unknown'})",
                 ],
-                "Configure systemd-oomd to monitor swap and memory pressure on app.slice and background.slice at 50% limit.",
+                "Ensure systemd-oomd is configured to monitor both swap and memory pressure on app.slice and background.slice.",
             ))
     else:
         issues.append(issue(
