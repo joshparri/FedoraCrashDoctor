@@ -133,31 +133,51 @@ def audit() -> dict[str, Any]:
         ))
 
     oomctl = run(["oomctl"], 10)
-    has_swap_monitoring = False
-    has_app_memory_pressure = False
+    swap_app = False
+    swap_bg = False
+    pressure_app = False
+    pressure_bg = False
+    app_limit = ""
 
     if oomctl["status"] == "ok":
         output = oomctl["output"]
-        swap_section = output.split("Swap Monitored CGroups:")[1].split("Memory Pressure Monitored CGroups:")[0] if "Swap Monitored CGroups:" in output else ""
-        has_swap_monitoring = "Path:" in swap_section
-        has_app_memory_pressure = "app.slice" in output.split("Memory Pressure Monitored CGroups:")[1] if "Memory Pressure Monitored CGroups:" in output else False
+        parts = output.split("Memory Pressure Monitored CGroups:")
+        swap_section = parts[0]
+        pressure_section = parts[1] if len(parts) > 1 else ""
+
+        swap_app = "app.slice" in swap_section
+        swap_bg = "background.slice" in swap_section
+        pressure_app = "app.slice" in pressure_section
+        pressure_bg = "background.slice" in pressure_section
+
+        m = re.search(r"app\.slice\n\s+Memory Pressure Limit: (\d+\.\d+%)", pressure_section)
+        if m:
+            app_limit = m.group(1)
 
     if oomd["active"] == "active" and oomd["enabled"] == "enabled":
-        if has_swap_monitoring and has_app_memory_pressure:
+        if swap_app and swap_bg and pressure_app and pressure_bg and app_limit == "50.00%":
             issues.append(issue(
                 "memory",
                 "systemd-oomd is active and monitoring workloads",
-                "confirmed protection",
-                [f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}", "oomctl confirms swap and memory pressure monitoring for user slices."],
-                "Keep systemd-oomd enabled. The desktop is protected against runaway applications.",
+                "strong preventative protection configured; effectiveness should be confirmed from future real pressure events.",
+                [
+                    f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}",
+                    "oomctl confirms swap monitoring on app.slice and background.slice.",
+                    f"oomctl confirms memory pressure monitoring on app.slice at {app_limit}."
+                ],
+                "Keep systemd-oomd enabled to protect the session from runaway applications.",
             ))
         else:
             issues.append(issue(
                 "memory",
                 "systemd-oomd is active but workload protection is incomplete",
                 "partial protection",
-                [f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}", f"Swap monitoring active: {has_swap_monitoring}", f"app.slice memory pressure monitoring: {has_app_memory_pressure}"],
-                "Configure systemd-oomd (via systemctl --user set-property) to monitor swap and memory pressure on app.slice and background.slice.",
+                [
+                    f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}",
+                    f"app.slice swap monitored: {swap_app}",
+                    f"app.slice pressure monitored: {pressure_app} (limit: {app_limit or 'unknown'})",
+                ],
+                "Configure systemd-oomd to monitor swap and memory pressure on app.slice and background.slice at 50% limit.",
             ))
     else:
         issues.append(issue(

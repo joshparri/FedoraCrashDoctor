@@ -1,6 +1,6 @@
 # Fedora Crash Doctor Host Stability Audit
 
-Generated: 2026-08-26T12:37:28+10:00
+Generated: 2026-08-26T12:51:47+10:00
 
 ## Host
 
@@ -13,12 +13,13 @@ Generated: 2026-08-26T12:37:28+10:00
 ### systemd-oomd is active and monitoring workloads
 
 - Category: `memory`
-- Classification: `confirmed protection`
+- Classification: `strong preventative protection configured; effectiveness should be confirmed from future real pressure events.`
 - Evidence:
   - `systemd-oomd active=active enabled=enabled`
-  - `oomctl confirms swap and memory pressure monitoring for user slices.`
+  - `oomctl confirms swap monitoring on app.slice and background.slice.`
+  - `oomctl confirms memory pressure monitoring on app.slice at 50.00%.`
 - Recommended action:
-  - Keep systemd-oomd enabled. The desktop is protected against runaway applications.
+  - Keep systemd-oomd enabled to protect the session from runaway applications.
 
 ### zram swap is present
 
@@ -26,9 +27,9 @@ Generated: 2026-08-26T12:37:28+10:00
 - Classification: `confirmed protection`
 - Evidence:
   - `NAME       TYPE            SIZE       USED PRIO
-/dev/zram0 partition 8589930496 2098200576  100`
+/dev/zram0 partition 8589930496 2005725184  100`
   - `NAME         DISKSIZE       DATA     COMPR ALGORITHM STREAMS ZERO-PAGES     TOTAL MEM-LIMIT  MEM-USED MIGRATED COMP-RATIO MOUNTPOINT
-/dev/zram0 8589934592 1874292736 656821796 lzo-rle                 7516 677646336         0 681177088     9229     2.7659 [SWAP]`
+/dev/zram0 8589934592 1792884736 619732822 lzo-rle                 7385 651599872         0 681177088     9229     2.7515 [SWAP]`
 - Recommended action:
   - Monitor pressure and process growth before changing zram size. Current priority/usage should be captured after any future freeze.
 
@@ -95,3 +96,13 @@ Generated: 2026-08-26T12:37:28+10:00
 - General Fedora/RPM corruption is not supported by the current health checks.
 - Realtek Wi-Fi/PCIe correctable errors should not be treated as causal without timing correlation.
 - Global UAS/ASPM/i915 kernel parameters should not be added speculatively.
+
+### Post-Stabilization (v1.0) Maintenance Check
+- Category: `maintenance`
+- Classification: `verified healthy`
+- Evidence:
+  - Btrfs scrub reports `0` errors across all error types.
+  - Internal NVMe SMART reports `0` media errors, `30%` used, and `0` critical warnings.
+  - kdump and persistent journal are active and operational.
+- Recommended action:
+  - Continue normal operation. The internal storage is healthy and properly configured. USB-based I/O errors are confirmed to be external device faults.

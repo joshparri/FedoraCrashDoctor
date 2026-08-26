@@ -68,7 +68,7 @@ class HostStabilityAuditTests(unittest.TestCase):
 
         def fake_run(argv, timeout=20):
             if argv[0] == "oomctl":
-                return {"status": "ok", "returncode": 0, "output": "Swap Monitored CGroups:\n\tPath: /app.slice\nMemory Pressure Monitored CGroups:\n\tPath: /app.slice\n"}
+                return {"status": "ok", "returncode": 0, "output": "Swap Monitored CGroups:\n\tPath: /app.slice\n\tPath: /background.slice\nMemory Pressure Monitored CGroups:\n\tPath: /app.slice\n\t\tMemory Pressure Limit: 50.00%\n\tPath: /background.slice"}
             return {"status": "ok", "returncode": 0, "output": ""}
 
         def fake_service_state(name):
@@ -82,7 +82,7 @@ class HostStabilityAuditTests(unittest.TestCase):
         data = audit.audit()
         oomd_issue = next(i for i in data["issues"] if i["category"] == "memory" and "systemd-oomd" in i["title"])
         self.assertEqual(oomd_issue["title"], "systemd-oomd is active and monitoring workloads")
-        self.assertEqual(oomd_issue["status"], "confirmed protection")
+        self.assertEqual(oomd_issue["status"], "strong preventative protection configured; effectiveness should be confirmed from future real pressure events.")
 
 
 if __name__ == "__main__":
