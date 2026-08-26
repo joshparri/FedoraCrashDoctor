@@ -486,7 +486,7 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
          r"amdgpu.*(?:reset|timeout|ring.*stalled)|nouveau.*(?:timeout|fault)|nvidia.*Xid|drm.*flip_done timed out",
          "A graphics driver or GPU timeout was recorded.", "moderate"),
         ("wayland", "warning", "Graphics", "Wayland compositor or session crash",
-         r"wayland.*(?:crash|fatal|error(?!\s*(?:disconnect|terminate)))|kwin_wayland.*(?:segfault|core dump|aborted)",
+         r"wayland.*(?:crash|fatal|error(?!\s*(?:disconnect|terminate|.*portal)))(?<!not fatal)|kwin_wayland.*(?:segfault|core dump|aborted)",
          "The Wayland display server or compositor reported a crash or fatal error.", "moderate"),
         ("oom", "warning", "Memory", "Memory exhaustion",
          r"out of memory|oom-kill|killed process|systemd-oomd.*killed",
@@ -652,7 +652,7 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         findings.append(_make_finding(
             "unclean_boot", "info", "Software", "A previous boot ended without a clean shutdown",
             "Boot accounting marks one or more sessions as crashed rather than normally shut down.",
-            crash_lines, "this_incident", "high"
+            crash_lines, "historical", "high"
         ))
 
     perf_lines = evidence_lines(checks.get("interrupt_latency", {}).get("output", ""), r"perf: interrupt took too long", 12)
@@ -684,6 +684,26 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         "has_storage": any(f["id"] in {"storage_failure", "filesystem"} for f in findings),
         "has_panic": any(f["id"] == "kernel_panic" for f in findings),
     }
+    is_clean_shutdown = False
+    shutdown_time = None
+    for ts, line in parsed_tail[-200:]:
+        if re.search(r"systemd-shutdown\[\d+\]:|systemd\[\d+\]: Shutting down\.|Reached target.*(?:System Shutdown|System Reboot)", line, re.I):
+            is_clean_shutdown = True
+            if not shutdown_time:
+                shutdown_time = ts
+
+    if is_clean_shutdown and shutdown_time:
+        for finding in findings:
+            if finding["id"] in {"wayland", "failed_services", "intel_display", "other_gpu"}:
+                valid_evidence = []
+                for line in finding["evidence"]:
+                    ts = parse_journal_time(line)
+                    if ts and (shutdown_time - timedelta(seconds=15)) <= ts <= (shutdown_time + timedelta(minutes=3)):
+                        continue
+                    valid_evidence.append(line)
+                finding["evidence"] = valid_evidence
+        findings = [f for f in findings if f["evidence"] or f["id"] not in {"wayland", "failed_services", "intel_display", "other_gpu"}]
+
     order = {"critical": 0, "warning": 1, "info": 2}
     findings.sort(key=lambda item: (order[item["severity"]], item["scope"] != "this_incident", item["title"]))
     return findings, context
@@ -747,14 +767,29 @@ def build_timeline(checks: dict[str, Any]) -> list[dict[str, Any]]:
             "seconds_before_last_log": max(0, int(delta.total_seconds())),
         })
     events = sorted(events, key=lambda item: item["timestamp"])[-80:]
-    events.append({
-        "timestamp": end_time.isoformat(timespec="seconds"),
-        "category": "Crash boundary",
-        "summary": "The previous journal stops here; the next boot was recorded as unclean/crashed.",
-        "evidence": parsed[-1][1],
-        "proximity": "Crash boundary",
-        "seconds_before_last_log": 0,
-    })
+    is_clean_shutdown = any(
+        re.search(r"systemd-shutdown\[\d+\]:|systemd\[\d+\]: Shutting down\.|Reached target.*(?:System Shutdown|System Reboot)", line, re.I)
+        for _, line in parsed[-200:]
+    )
+
+    if is_clean_shutdown:
+        events.append({
+            "timestamp": end_time.isoformat(timespec="seconds"),
+            "category": "Clean shutdown boundary",
+            "summary": "The previous journal ends with a clean shutdown or intentional reboot.",
+            "evidence": parsed[-1][1],
+            "proximity": "Shutdown boundary",
+            "seconds_before_last_log": 0,
+        })
+    else:
+        events.append({
+            "timestamp": end_time.isoformat(timespec="seconds"),
+            "category": "Crash boundary",
+            "summary": "The previous journal stops here; the next boot was recorded as unclean/crashed.",
+            "evidence": parsed[-1][1],
+            "proximity": "Crash boundary",
+            "seconds_before_last_log": 0,
+        })
     return events
 
 
@@ -977,6 +1012,14 @@ def build_incidents(findings, checks):
                     else: b_type = "unknown"
                     boundaries.append({"boot": b, "type": b_type, "ts": ts.replace(tzinfo=None)})
 
+    clean_boots = set()
+    tail = checks.get("previous_boot_tail", {}).get("output", "")
+    if re.search(r"systemd-shutdown\[\d+\]:|systemd\[\d+\]: Shutting down\.|Reached target.*(?:System Shutdown|System Reboot)", tail[-15000:], re.I):
+        clean_boots.add("-1")
+
+    if "-1" in clean_boots:
+        boundaries = [b for b in boundaries if not (b["boot"] == "-1" and b["type"] == "unclean shutdown")]
+
     incidents = []
     for boot_idx, b_data in boots.items():
         boot_bounds = sorted([bd for bd in boundaries if bd["boot"] == boot_idx], key=lambda x: x["ts"])
@@ -991,6 +1034,8 @@ def build_incidents(findings, checks):
 
         if not merged and boot_idx == "0":
             merged = [{"boot": "0", "type": "active session", "ts": boots["0"]["end"]}]
+        elif not merged and boot_idx == "-1" and "-1" in clean_boots:
+            merged = [{"boot": "-1", "type": "clean shutdown", "ts": boots["-1"]["end"]}]
 
         for bd in merged:
             w_start = bd["ts"] - timedelta(minutes=15)
@@ -1034,7 +1079,7 @@ def build_incidents(findings, checks):
 
     report_incidents = []
     for inc in incidents:
-        if not inc["events"] and inc["boundary"] == "active session":
+        if not inc["events"] and inc["boundary"] in {"active session", "clean shutdown"}:
             continue
 
         symptoms = {}
@@ -1172,9 +1217,10 @@ def build_incidents(findings, checks):
 
     return report_incidents, boot_warnings, unresolved_evidence
 
-def build_overall(incidents):
-    if not incidents:
-        return {"title": "No leading cause identified", "confidence": "low", "summary": "No incidents."}, []
+def build_overall(incidents, boot_warnings=None):
+    boot_warnings = boot_warnings or []
+    if not incidents and not boot_warnings:
+        return {"title": "No leading cause identified", "confidence": "low", "summary": "No incidents or warnings."}, []
 
     # Sort incidents by time
     sorted_incidents = sorted(incidents, key=lambda x: x["sort_key"])
@@ -1194,7 +1240,10 @@ def build_overall(incidents):
                 break
 
     if not target or not target["hypotheses"]:
-        return {"title": "No evidence-backed leading cause yet", "confidence": "low", "summary": "No cause."}, []
+        # If there are boot warnings but no strict incident, mention that stability warnings exist
+        has_active_warnings = any(inc["hypotheses"] for inc in sorted_incidents) or bool(boot_warnings)
+        title = "Recurring stability warnings remain" if has_active_warnings else "No leading cause identified"
+        return {"title": title, "confidence": "low", "summary": "No crash or unrecoverable lockup detected in the scanned boots."}, []
 
     top = target["hypotheses"][0]
     return {
@@ -1519,7 +1568,7 @@ def collect(
     freeze_classes = classify_freeze_evidence(findings, canary)
     telemetry_timeline = build_telemetry_timeline(canary.get("samples", []))
     incidents, boot_warnings, unresolved = build_incidents(findings, checks)
-    overall, hypotheses = build_overall(incidents) if incidents else ({"title": "No leading cause identified", "confidence": "low", "summary": "No incidents."}, [])
+    overall, hypotheses = build_overall(incidents, boot_warnings)
 
     baseline = load_baseline(baseline_path)
     now = metadata["generated"]

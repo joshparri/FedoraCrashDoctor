@@ -14,6 +14,37 @@ def check(title, output, category="Software", status="ok"):
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_clean_reboot_classification(self):
+        checks = {
+            "journal_boots": check("boots", "0 00000000000000000000000000000000 2026-07-29 10:00:00 2026-07-29 11:00:00\n-1 11111111111111111111111111111111 2026-07-29 09:00:00 2026-07-29 09:59:00"),
+            "previous_boot_tail": check("tail", "2026-07-29T09:58:00+1000 host systemd[1]: Reached target System Reboot.\n2026-07-29T09:58:10+1000 host kwin_wayland[123]: segfault at 0\n"),
+            "boot_history": check("history", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 10:00 - still running\nreboot   system boot  7.1.5-200.fc44.x Wed Jul 29 09:00 - crash  (01:00)"),
+        }
+        findings, context = analyse(checks)
+        incidents, warnings, unresolved = build_incidents(findings, checks)
+        
+        # Should be filtered out because active session and clean shutdown have no events
+        self.assertEqual(len(incidents), 0)
+        
+        # Wayland error during shutdown should be suppressed
+        wayland_finding = next((f for f in findings if f["id"] == "wayland"), None)
+        self.assertIsNone(wayland_finding)
+
+        overall, hyps = build_overall(incidents, warnings)
+        self.assertEqual(overall["title"], "No leading cause identified")
+
+    def test_recurring_stability_warnings_remain(self):
+        checks = {
+            "journal_boots": check("boots", "0 00000000000000000000000000000000 2026-07-29 10:00:00 2026-07-29 11:00:00\n-1 11111111111111111111111111111111 2026-07-29 09:00:00 2026-07-29 09:59:00"),
+            "previous_boot_tail": check("tail", "2026-07-29T09:58:00+1000 host systemd[1]: Reached target System Reboot.\n"),
+            "display_history": check("history", "2026-07-29T10:15:00+1000 host kernel: i915 atomic update failure"),
+        }
+        findings, context = analyse(checks)
+        incidents, warnings, unresolved = build_incidents(findings, checks)
+        
+        overall, hyps = build_overall(incidents, warnings)
+        self.assertEqual(overall["title"], "Recurring stability warnings remain")
+
     def test_pcie_address_anywhere_is_mapped_to_device(self):
         pci = """0000:02:00.0 Network controller [0280]: Realtek Semiconductor Co., Ltd. RTL8821CE [10ec:c821]\n\tKernel driver in use: rtw88_8821ce\n"""
         logs = """2026-07-29T09:53:40+1000 host kernel: rtw88_8821ce 0000:02:00.0: PCIe Bus Error: severity=Correctable, type=Data Link Layer, (Receiver ID)\n2026-07-29T10:00:00+1000 host kernel: 0000:02:00.0: AER: Corrected error received\n"""
@@ -333,7 +364,7 @@ class AnalysisTests(unittest.TestCase):
     def test_overall_incidents_no_hypotheses(self):
         incidents = [{"boot_index": "0", "sort_key": 0, "failure_boundary": "active session", "hypotheses": []}]
         overall, hypotheses = build_overall(incidents)
-        self.assertEqual(overall["title"], "No evidence-backed leading cause yet")
+        self.assertEqual(overall["title"], "No leading cause identified")
         self.assertEqual(hypotheses, [])
 
     def test_overall_only_boot_warnings(self):

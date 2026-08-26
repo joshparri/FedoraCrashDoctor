@@ -371,8 +371,6 @@ def dispatch(req: dict[str, Any], uid: int, gid: int, home: str, request_id: str
         return stress_test("memory", request_id)
     if action == "list_targets":
         return {"smart_devices": discover_smart_devices(), "root_fstype": command(["findmnt", "-n", "-o", "FSTYPE", "/"], 20)["output"].strip()}
-    if action == "build_rpm":
-        return build_rpm()
     raise ValueError("Action is not allowed")
 
 
@@ -429,36 +427,7 @@ def broker() -> int:
             send({"type": "result", "id": str(locals().get("request_id", "")), "ok": False, "error": f"{type(exc).__name__}: {exc}"})
     return 0
 
-def build_rpm() -> dict[str, Any]:
-    from subprocess import CalledProcessError
 
-    if not shutil.which("rpmbuild", path=SAFE_PATH):
-        return {"ok": False, "output": "rpmbuild is not installed."}
-
-    home = Path(os.environ.get("HOME", "/root"))
-    topdir = home / "rpmbuild"
-    try:
-        command(["rpmdev-setuptree"], 30)
-        tmp = Path(tempfile.mkdtemp(prefix="fedora-crash-doctor-build-"))
-        try:
-            source_dir = Path(__file__).resolve().parent
-            build_dir = tmp / f"{NAME}-{VERSION}"
-            shutil.copytree(source_dir, build_dir, symlinks=True)
-            shutil.rmtree(build_dir / ".git", ignore_errors=True)
-            archive = topdir / "SOURCES" / f"{NAME}-{VERSION}.tar.gz"
-            topdir.mkdir(parents=True, exist_ok=True)
-            (topdir / "SOURCES").mkdir(parents=True, exist_ok=True)
-            (topdir / "SPECS").mkdir(parents=True, exist_ok=True)
-            subprocess.run(["tar", "-C", str(tmp), "-czf", str(archive), build_dir.name], check=True)
-            shutil.copy2(source_dir / "packaging" / f"{NAME}.spec", topdir / "SPECS")
-            result = subprocess.run(["rpmbuild", "-ba", str(topdir / "SPECS" / f"{NAME}.spec")], capture_output=True, text=True, check=True)
-            return {"ok": True, "output": result.stdout + "\n" + result.stderr, "rpm_path": str(topdir / "RPMS"), "srpm_path": str(topdir / "SRPMS")}
-        finally:
-            shutil.rmtree(tmp)
-    except CalledProcessError as exc:
-        return {"ok": False, "output": exc.stdout + "\n" + exc.stderr}
-    except Exception as exc:
-        return {"ok": False, "output": str(exc)}
 
 
 if __name__ == "__main__":
