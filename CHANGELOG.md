@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.2.0-dev — Unreleased
+## 3.2.0 — 2026-08-27
 - Hardened boot boundary logic to detect clean `systemd-shutdown` sequences and ignore historical crash artifacts.
 - Implemented shutdown-context suppression window to ignore Wayland/Plasma teardown noise during clean reboots.
 - Updated Wayland compositor regex to safely ignore `xkbcomp` and portal registration teardown errors.

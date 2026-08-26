@@ -22,10 +22,10 @@ class AnalysisTests(unittest.TestCase):
         }
         findings, context = analyse(checks)
         incidents, warnings, unresolved = build_incidents(findings, checks)
-        
+
         # Should be filtered out because active session and clean shutdown have no events
         self.assertEqual(len(incidents), 0)
-        
+
         # Wayland error during shutdown should be suppressed
         wayland_finding = next((f for f in findings if f["id"] == "wayland"), None)
         self.assertIsNone(wayland_finding)
@@ -41,7 +41,7 @@ class AnalysisTests(unittest.TestCase):
         }
         findings, context = analyse(checks)
         incidents, warnings, unresolved = build_incidents(findings, checks)
-        
+
         overall, hyps = build_overall(incidents, warnings)
         self.assertEqual(overall["title"], "Recurring stability warnings remain")
 
@@ -331,9 +331,9 @@ class AnalysisTests(unittest.TestCase):
         sys.modules['PySide6.QtCore'] = MagicMock()
         sys.modules['PySide6.QtGui'] = MagicMock()
         sys.modules['PySide6.QtWidgets'] = MagicMock()
-        
+
         from fedora_crash_doctor import MainWindow
-        
+
         checks = {
             "previous_errors": check("prev", "2026-07-29T13:26:00+1000 host kernel: i915 atomic update failure"),
             "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
@@ -343,16 +343,16 @@ class AnalysisTests(unittest.TestCase):
         collector.get_evidence = MagicMock(return_value=checks)
         report = collector.collect("quick")
         report_json = json.loads(json.dumps(report, default=str))
-        
+
         window = MainWindow()
         window.report = report_json
-        
+
         self.assertIn("overall", report_json)
         self.assertIn("hypotheses", report_json)
         self.assertIn("incidents", report_json)
         self.assertIn("boot_warnings", report_json)
         self.assertIn("unresolved_evidence", report_json)
-        
+
         window.populate_fixes()
 
 
@@ -387,17 +387,17 @@ class AnalysisTests(unittest.TestCase):
         }
         findings, _ = analyse(checks)
         incidents, _, _ = build_incidents(findings, checks)
-        
+
         self.assertEqual(len(incidents), 2)
         oom_inc = next(i for i in incidents if i["failure_boundary"] == "OOM event")
         crash_inc = next(i for i in incidents if i["failure_boundary"] == "unclean shutdown")
-        
+
         # The OOM event at 12:21 should be in the OOM window (12:06 to 12:22)
         self.assertTrue(any("Out of memory" in e["line"] for e in oom_inc["incident_evidence"]))
-        
+
         # The OOM event at 12:21 should ALSO be in the crash window (12:11 to 12:27)
         self.assertTrue(any("Out of memory" in e["line"] for e in crash_inc["incident_evidence"]))
-        
+
         self.assertEqual(crash_inc["strongest_hypothesis"], "Memory/swap exhaustion with swap-I/O thrashing")
 
     def test_wayland_crash_before_unclean_shutdown(self):
@@ -408,11 +408,11 @@ class AnalysisTests(unittest.TestCase):
         }
         findings, _ = analyse(checks)
         incidents, _, _ = build_incidents(findings, checks)
-        
+
         self.assertEqual(len(incidents), 2)
         wayland_inc = next(i for i in incidents if i["failure_boundary"] == "compositor crash")
         crash_inc = next(i for i in incidents if i["failure_boundary"] == "unclean shutdown")
-        
+
         self.assertTrue(any("wayland-server" in e["line"] for e in wayland_inc["incident_evidence"]))
         self.assertTrue(any("wayland-server" in e["line"] for e in crash_inc["incident_evidence"]))
 
@@ -424,15 +424,15 @@ class AnalysisTests(unittest.TestCase):
         }
         findings, _ = analyse(checks)
         incidents, _, _ = build_incidents(findings, checks)
-        
+
         self.assertEqual(len(incidents), 2)
         wayland_inc = next(i for i in incidents if i["failure_boundary"] == "compositor crash")
         oom_inc = next(i for i in incidents if i["failure_boundary"] == "OOM event")
-        
+
         # Wayland event is in both
         self.assertTrue(any("wayland-server" in e["line"] for e in wayland_inc["incident_evidence"]))
         self.assertTrue(any("wayland-server" in e["line"] for e in oom_inc["incident_evidence"]))
-        
+
         # OOM event is in both
         self.assertTrue(any("Out of memory" in e["line"] for e in wayland_inc["incident_evidence"]))
         self.assertTrue(any("Out of memory" in e["line"] for e in oom_inc["incident_evidence"]))
@@ -441,23 +441,49 @@ class AnalysisTests(unittest.TestCase):
         # build_overall sorts by sort_key, order shouldn't matter
         inc1 = {"boot_index": "0", "sort_key": 1, "failure_boundary": "active session", "hypotheses": [{"title": "A", "confidence": "high"}]}
         inc2 = {"boot_index": "0", "sort_key": 2, "failure_boundary": "active session", "hypotheses": [{"title": "B", "confidence": "high"}]}
-        
+
         out1, hyp1 = build_overall([inc1, inc2])
         out2, hyp2 = build_overall([inc2, inc1])
-        
+
         self.assertEqual(out1, out2)
         self.assertEqual(hyp1, hyp2)
         self.assertEqual(out1["title"], "B")
 
+    def test_overall_build_with_missing_boot_key(self):
+        # Regression test for KeyError: 'boot'
+        # incidents didn't have 'boot' but had 'boot_index'
+        inc1 = {"boot_index": "-1", "sort_key": 1, "failure_boundary": "unclean shutdown", "hypotheses": [{"title": "A", "confidence": "high"}]}
+        try:
+            out, hyp = build_overall([inc1])
+            self.assertEqual(out["title"], "A")
+        except KeyError as e:
+            self.fail(f"build_overall raised KeyError: {e}")
 
-    
+    def test_wayland_crash_in_current_boot_is_captured(self):
+        # Regression test for current-boot Wayland segfault not being captured
+        checks = {
+            "display_current": check("curr", "2026-08-27T08:43:11.136497+10:00 host kwin_wayland[8851]: segfault at address 0x0"),
+            "boot_history": check("boot", ""),
+            "journal_boots": check("boots", "0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-08-27 08:00:00 AEST Wed 2026-08-27 09:00:00 AEST")
+        }
+        findings, _ = analyse(checks)
+        incidents, _, _ = build_incidents(findings, checks)
+
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["boot_index"], "0")
+        self.assertEqual(incidents[0]["failure_boundary"], "compositor crash")
+        self.assertTrue(any("segfault" in e["line"] for e in incidents[0]["incident_evidence"]))
+
+
+
+
     def test_readiness_journal_no_previous(self):
         from collector import assess_readiness
         checks = {"journal_dir": {"returncode": 0, "output": "/var/log/journal"}, "journal_boots": {"output": "0 boot current"}}
         res = assess_readiness(checks)
         j = next(s for s in res["sources"] if s["name"] == "Persistent Journal")
         self.assertEqual(j["status"], "unverified")
-        
+
     def test_readiness_pstore_command_failure(self):
         from collector import assess_readiness
         checks = {"pstore": {"returncode": 1, "output": "ls: cannot access /sys/fs/pstore"}}

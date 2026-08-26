@@ -57,6 +57,6 @@ restorecon -RF "$SHARE_DIR" "$LIBEXEC_DIR" /usr/share/polkit-1/actions/org.fedor
 rm -rf /opt/fedora-crash-doctor
 
 echo
-echo "Fedora Crash Doctor 3.2.0-dev installed."
+echo "Fedora Crash Doctor 3.2.0 installed."
 echo "Open the application launcher and search for Fedora Crash Doctor."
 echo "The first privileged action asks once; the locked-down helper remains attached until the app closes."
