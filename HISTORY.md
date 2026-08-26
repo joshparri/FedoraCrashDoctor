@@ -1544,10 +1544,10 @@ It's make the next freeze **impossible to hide its cause**.
 We completed the Fedora Crash Doctor v1.0 GUI and schema migration. We have full support for cancel-safe partial reports, asynchronous scan progress, and Btrfs/SMART status parsing.
 
 Live diagnostics executed via passwordless sudo helper:
-- **btrfs scrub**: finished with `0` corruption errors, `0` read/write errors.
-- **nvme smart**: internal drive `nvme0n1` reports `media_errors: 0`, `critical_warning: 0`, `percentage_used: 30%`.
+- **btrfs scrub**: verified scrub status shows `0` corruption errors, `0` read/write errors.
+- **nvme smart**: SMART/NVMe telemetry currently shows no media errors or critical warnings (internal drive `nvme0n1` reports `media_errors: 0`, `critical_warning: 0`, `percentage_used: 30%`). This is strong current health evidence, though not proof of perfect hardware.
 - **kdump**: confirmed operational (`kexec: loaded kdump kernel`).
 - **persistent journal**: confirmed active and configured.
-- **systemd-oomd**: active, protecting against desktop starvation.
+- **systemd-oomd**: service is active, but an audit shows `Swap Monitored CGroups` is empty and memory pressure thresholds (80% over 20s) may be too lenient to guarantee desktop starvation prevention. It provides partial coverage for the workload.
 
-The internal NVMe is demonstrably healthy. Previous IO errors were correctly attributed to a USB device, confirming our inheritance logic. The system is hardened and telemetry is active.
+The internal NVMe currently appears healthy based on SMART metrics. This strengthens our attribution of earlier I/O incidents to external USB storage, though it does not conclusively prove every prior I/O error was an external fault. The system is hardened and telemetry is active.

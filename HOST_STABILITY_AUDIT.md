@@ -30,12 +30,13 @@ Generated: 2026-08-26T11:34:46+10:00
 ### systemd-oomd is active
 
 - Category: `memory`
-- Classification: `confirmed protection`
+- Classification: `partial protection`
 - Evidence:
   - `systemd-oomd active=active enabled=enabled`
-  - `Fedora uses PSI/cgroup-aware oomd policy by default.`
+  - `oomctl` shows Memory Pressure Monitored CGroups for `user@1002.service` and `app.slice` with an 80% limit for 20s.
+  - `oomctl` shows **Swap Monitored CGroups** is completely empty.
 - Recommended action:
-  - Keep systemd-oomd enabled. Do not install a competing OOM daemon unless later evidence proves oomd cannot act soon enough.
+  - systemd-oomd is active but may not fully protect the desktop during extreme swap thrashing because ManagedOOMSwap is not effectively monitoring any cgroups, and the 80% memory pressure limit over 20s may be too lenient. Keep enabled, but monitor if it intervenes in time during the next freeze.
 
 ### zram swap is present
 
