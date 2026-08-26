@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://localhost.invalid/fedora-crash-doctor/report.schema.json",
+  "title": "Fedora Crash Doctor Report",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "metadata",
+    "counts",
+    "overall",
+    "categories",
+    "freeze_classes",
+    "readiness",
+    "findings",
+    "timeline",
+    "checks",
+    "test_targets",
+    "limitations"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"type": "integer"},
+    "schema_version": {"const": 1},
+    "metadata": {
+      "type": "object",
+      "required": ["generated", "mode", "version"],
+      "additionalProperties": true,
+      "properties": {
+        "generated": {"type": "string"},
+        "mode": {"enum": ["quick", "full", "deep"]},
+        "version": {"type": "string"}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "required": ["critical", "warning", "info"],
+      "properties": {
+        "critical": {"type": "integer"},
+        "warning": {"type": "integer"},
+        "info": {"type": "integer"}
+      },
+      "additionalProperties": true
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["title", "category", "command", "status", "state", "returncode", "duration_seconds", "output"],
+        "properties": {
+          "title": {"type": "string"},
+          "category": {"type": "string"},
+          "command": {"type": "string"},
+          "status": {"type": "string"},
+          "state": {
+            "enum": ["pending", "running", "completed", "failed", "timed_out", "cancelled", "skipped", "unavailable", "permission_denied"]
+          },
+          "returncode": {"type": ["integer", "null"]},
+          "duration_seconds": {"type": "number"},
+          "output": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "findings": {"type": "array"},
+    "timeline": {"type": "array"},
+    "telemetry_timeline": {"type": "array"},
+    "freeze_classes": {"type": "array"},
+    "limitations": {"type": "array"}
+  }
+}

@@ -24,9 +24,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from device_inventory import attribute_log_line, parse_lsblk_json
+from freeze_classifiers import classify_freeze_evidence
+from report_schema import REPORT_SCHEMA_VERSION, validate_report
+from telemetry_timeline import build_telemetry_timeline
+from version import app_version
+
 MAX_OUTPUT = 700_000
 DEFAULT_TIMEOUT = 40
 Progress = Callable[[int, int, str], None]
+CancelCheck = Callable[[], bool]
 
 
 def _child_parent_death_signal() -> None:
@@ -54,6 +61,7 @@ def run(command: list[str] | str, timeout: int = DEFAULT_TIMEOUT) -> dict[str, A
         return {
             "command": display,
             "status": "not_available",
+            "state": "unavailable",
             "returncode": 127,
             "duration_seconds": 0,
             "output": f"Command is not installed: {command[0]}",
@@ -81,6 +89,7 @@ def run(command: list[str] | str, timeout: int = DEFAULT_TIMEOUT) -> dict[str, A
         return {
             "command": display,
             "status": status,
+            "state": "completed" if status == "ok" else "failed",
             "returncode": proc.returncode,
             "duration_seconds": round(time.monotonic() - started, 2),
             "output": output,
@@ -92,6 +101,7 @@ def run(command: list[str] | str, timeout: int = DEFAULT_TIMEOUT) -> dict[str, A
         return {
             "command": display,
             "status": "timeout",
+            "state": "timed_out",
             "returncode": 124,
             "duration_seconds": round(time.monotonic() - started, 2),
             "output": output + f"\nTimed out after {timeout} seconds.",
@@ -100,6 +110,7 @@ def run(command: list[str] | str, timeout: int = DEFAULT_TIMEOUT) -> dict[str, A
         return {
             "command": display,
             "status": "error",
+            "state": "failed",
             "returncode": 1,
             "duration_seconds": round(time.monotonic() - started, 2),
             "output": f"{type(exc).__name__}: {exc}",
@@ -122,20 +133,46 @@ class Task:
     category: str = "Software"
 
 
+def cancelled_result(task: Task) -> dict[str, Any]:
+    return {
+        "title": task.title,
+        "category": task.category,
+        "command": task.command if isinstance(task.command, str) else shlex.join(task.command),
+        "status": "cancelled",
+        "state": "cancelled",
+        "returncode": None,
+        "duration_seconds": 0,
+        "output": "Cancelled before this check started.",
+        "timeout_seconds": task.timeout,
+        "privilege": "root-or-current-user",
+    }
+
+
 class CheckRunner:
-    def __init__(self, tasks: list[Task], progress: Progress | None):
+    def __init__(self, tasks: list[Task], progress: Progress | None, cancel_requested: CancelCheck | None = None):
         self.tasks = tasks
         self.progress = progress
+        self.cancel_requested = cancel_requested
         self.checks: dict[str, Any] = {}
+        self.cancelled = False
 
     def execute(self) -> dict[str, Any]:
         total = len(self.tasks)
         for index, task in enumerate(self.tasks, start=1):
+            if self.cancel_requested and self.cancel_requested():
+                self.cancelled = True
+                for remaining in self.tasks[index - 1:]:
+                    self.checks[remaining.key] = cancelled_result(remaining)
+                break
             if self.progress:
                 self.progress(index - 1, total, task.title)
             result = run(task.command, task.timeout)
             result["title"] = task.title
             result["category"] = task.category
+            result["id"] = task.key
+            result["timeout_seconds"] = task.timeout
+            result["privilege"] = "root-or-current-user"
+            result.setdefault("state", "completed" if result.get("status") == "ok" else "failed")
             self.checks[task.key] = result
         if self.progress:
             self.progress(total, total, "Analysing and correlating evidence")
@@ -250,11 +287,16 @@ def _metadata() -> dict[str, Any]:
         "architecture": platform.machine(),
         "fedora": os_release.get("PRETTY_NAME", "Unknown Linux"),
         "boot_id": read_file("/proc/sys/kernel/random/boot_id", 100).strip(),
-        "version": "3.0.0",
+        "version": app_version(),
     }
 
 
+SCAN_MODES = {"quick", "full", "deep"}
+
+
 def build_tasks(mode: str) -> list[Task]:
+    if mode not in SCAN_MODES:
+        raise ValueError("mode must be quick, full or deep")
     tasks = [
         Task("boot_history", "Boot and crash history", ["last", "-x"], 15, "Software"),
         Task("journal_boots", "Available journal boots", ["journalctl", "--list-boots", "--no-pager"], 15, "Software"),
@@ -268,6 +310,10 @@ def build_tasks(mode: str) -> list[Task]:
         Task("pci", "PCI hardware and active drivers", ["lspci", "-Dnnk"], 25, "PCIe / Network"),
         Task("usb", "USB device tree", ["lsusb", "-tv"], 20, "PCIe / Network"),
         Task("block", "Storage layout", ["lsblk", "-e7", "-o", "NAME,PATH,TYPE,SIZE,FSTYPE,FSVER,MOUNTPOINTS,MODEL,SERIAL,ROTA,TRAN"], 20, "Storage"),
+        Task("block_json", "Storage layout (machine readable)", ["lsblk", "-J", "-e7", "-o", "NAME,PATH,TYPE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL,RM,TRAN"], 20, "Storage"),
+        Task("swap_show", "Swap Configuration", ["swapon", "--show", "--bytes"], 15, "Memory"),
+        Task("zramctl", "ZRAM Configuration", ["zramctl", "--output-all", "--bytes"], 15, "Memory"),
+        Task("oomctl", "systemd-oomd status", ["oomctl"], 15, "Memory"),
         Task("memory", "Memory, swap and pressure", "free -h; echo; for f in /proc/pressure/cpu /proc/pressure/memory /proc/pressure/io; do echo ===$f===; cat $f; done", 15, "Memory"),
         Task("filesystems", "Filesystem space", ["df", "-hT", "-x", "tmpfs", "-x", "devtmpfs"], 20, "Storage"),
         Task("sensors", "Temperatures and sensors", ["sensors"], 25, "Thermals"),
@@ -298,10 +344,6 @@ def build_tasks(mode: str) -> list[Task]:
         Task("crashkernel_mem", "Crash kernel memory reserved", "grep -i crashkernel /proc/cmdline || true", 10, "Software"),
         Task("kdump_target_space", "Kdump target space", "df -h /var/crash || true", 10, "Software"),
         Task("canary_stat", "Canary heartbeat", "stat -c %Y /var/log/fedora-crash-doctor/canary.log || echo 0", 10, "Software"),
-        Task("kexec_loaded", "Crash kernel loaded", ["cat", "/sys/kernel/kexec_crash_loaded"], 10, "Software"),
-        Task("crashkernel_mem", "Crash kernel memory reserved", "grep -i crashkernel /proc/cmdline || true", 10, "Software"),
-        Task("kdump_target_space", "Kdump target space", "df -h /var/crash || true", 10, "Software"),
-        Task("canary_stat", "Canary heartbeat", "stat -c %Y /var/log/fedora-crash-doctor/canary.log || echo 0", 10, "Software"),
     ]
     if shutil.which("abrt-cli", path=_safe_env()["PATH"]):
         tasks.append(Task("abrt", "ABRT detected problems", ["abrt-cli", "list"], 35, "Software"))
@@ -318,16 +360,17 @@ def build_tasks(mode: str) -> list[Task]:
         tasks.append(Task(f"smart_{index}", f"SMART health: {device}", ["smartctl", "-x", device], 75, "Storage"))
     for index, device in enumerate(discover_nvme_devices()):
         tasks.append(Task(f"nvme_{index}", f"NVMe health: {device}", ["nvme", "smart-log", device], 40, "Storage"))
-    if mode == "full":
-        if shutil.which("fwts", path=_safe_env()["PATH"]):
-            tasks.append(Task("fwts", "Firmware Test Suite", ["fwts", "--batch", "--stdout-summary"], 300, "Firmware"))
+    if mode in {"full", "deep"}:
         tasks.extend([
             Task("dnf_check", "Package dependency consistency", ["dnf", "check"], 220, "Software"),
-            Task("rpm_verify", "RPM file verification", "rpm -Va 2>&1 | head -6000", 300, "Software"),
             Task("systemd_blame", "Slowest boot services", ["systemd-analyze", "blame", "--no-pager"], 40, "Software"),
             Task("network_health", "NetworkManager state", ["nmcli", "-f", "STATE,CONNECTIVITY", "general"], 20, "PCIe / Network"),
             Task("resolver", "DNS resolver statistics", ["resolvectl", "statistics"], 25, "PCIe / Network"),
         ])
+    if mode == "deep":
+        if shutil.which("fwts", path=_safe_env()["PATH"]):
+            tasks.append(Task("fwts", "Deep firmware test suite", ["fwts", "--batch", "--stdout-summary"], 180, "Firmware"))
+        tasks.append(Task("rpm_verify", "Deep RPM file verification", "rpm -Va 2>&1 | head -6000", 180, "Software"))
     return tasks
 
 
@@ -340,8 +383,11 @@ def add_virtual_checks(checks: dict[str, Any]) -> None:
         "category": "Graphics",
         "command": "read /sys/class/drm/card*/error",
         "status": "ok",
+        "state": "completed",
         "returncode": 0,
         "duration_seconds": 0,
+        "timeout_seconds": 0,
+        "privilege": "root-or-current-user",
         "output": "\n".join(gpu_chunks) if gpu_chunks else "No DRM error-state files exposed.",
     }
     pstore_chunks = []
@@ -352,8 +398,11 @@ def add_virtual_checks(checks: dict[str, Any]) -> None:
         "category": "Software",
         "command": "read /sys/fs/pstore",
         "status": "ok",
+        "state": "completed",
         "returncode": 0,
         "duration_seconds": 0,
+        "timeout_seconds": 0,
+        "privilege": "root-or-current-user",
         "output": "\n".join(pstore_chunks) if pstore_chunks else "No pstore crash records found.",
     }
     canary = Path("/var/log/fedora-crash-doctor/canary.log")
@@ -362,8 +411,11 @@ def add_virtual_checks(checks: dict[str, Any]) -> None:
         "category": "Software",
         "command": f"read {canary}",
         "status": "ok" if canary.exists() else "not_available",
+        "state": "completed" if canary.exists() else "unavailable",
         "returncode": 0,
         "duration_seconds": 0,
+        "timeout_seconds": 0,
+        "privilege": "root-or-current-user",
         "output": tail_file(canary, 1200) if canary.exists() else "System canary is not enabled.",
     }
 
@@ -458,7 +510,7 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
     tail_lines = checks.get("previous_boot_tail", {}).get("output", "").splitlines()
     parsed_tail = [(parse_journal_time(line), line) for line in tail_lines]
     parsed_tail = [(ts, line) for ts, line in parsed_tail if ts is not None]
-    
+
     if parsed_tail:
         end_time = max(ts for ts, _ in parsed_tail)
         recent_failures = []
@@ -466,7 +518,7 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
             if end_time - ts <= timedelta(minutes=10):
                 if re.search(r"systemd\[\d*\]:.*(?:Failed to start|failed with result|Main process exited, code=(?:exited|dumped), status=(?!0\b))", line, re.I):
                     recent_failures.append(line.strip())
-        
+
         if recent_failures:
             findings.append(_make_finding(
                 "failed_services", "warning", "Software", "Failed system services near crash",
@@ -481,10 +533,21 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         dev = dev_match.group(1) if dev_match else "unknown"
         disk_events.setdefault(dev, []).append(line.strip())
 
+    try:
+        device_inventory = parse_lsblk_json(checks.get("block_json", {}).get("output", ""))
+    except Exception:
+        device_inventory = {}
     lsblk_out = checks.get("block", {}).get("output", "")
     for dev, lines in disk_events.items():
         base_dev = re.sub(r"p?\d+$", "", dev) if dev.startswith("nvme") else dev.rstrip("0123456789")
-        is_removable = bool(re.search(fr"\b{base_dev}\b.*usb", lsblk_out, re.I) or re.search(fr"\[{base_dev}\].*removable disk", all_text, re.I))
+        attributions = [attribute_log_line(line, device_inventory) for line in lines]
+        attributions = [item for item in attributions if item]
+        known_attrs = [item for item in attributions if item.get("known")]
+        primary_attr = known_attrs[0] if known_attrs else None
+        is_removable = bool(
+            primary_attr and (primary_attr.get("removable") or primary_attr.get("transport") == "usb")
+        ) or bool(re.search(fr"\b{base_dev}\b.*usb", lsblk_out, re.I) or re.search(fr"\[{base_dev}\].*removable disk", all_text, re.I))
+        is_system_disk = bool(primary_attr and primary_attr.get("system_disk"))
         has_smart = any(re.search(r"SMART|critical_warning", l, re.I) for l in lines)
         has_write_err = any(re.search(r"write|WRITE", l, re.I) for l in lines)
         has_read_err = any(re.search(r"read|READ", l, re.I) for l in lines)
@@ -494,13 +557,13 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         severity = "warning"
         title = f"Storage errors on {dev}"
         explanation = f"The storage device {dev} reported errors."
-        
+
         err_types = []
         if has_read_err: err_types.append("read errors")
         if has_write_err: err_types.append("write errors")
         if has_reset: err_types.append("link resets or timeouts")
         if not err_types: err_types.append("I/O or filesystem errors")
-        
+
         if is_removable:
             title = f"Errors on removable device {dev}"
             explanation = f"A removable device ({dev}) reported {', '.join(err_types)}."
@@ -515,16 +578,24 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
         else:
             if has_smart:
                 severity = "critical"
-                title = f"Active failure on internal disk {dev}"
-                explanation = f"The internal system disk {dev} reported SMART health failures. Immediate backup is recommended."
+                if is_system_disk:
+                    title = f"Active failure on internal system disk {dev}"
+                    explanation = f"The internal system disk {dev} reported SMART health failures. Immediate backup is recommended."
+                else:
+                    title = f"Storage health failure on {dev}"
+                    explanation = f"The storage device {dev} reported SMART health failures. Attribute the device before assuming it is the Fedora system disk."
             elif len(lines) > 2:
                 severity = "critical"
-                title = f"Repeated errors on internal disk {dev}"
-                explanation = f"The internal disk {dev} is experiencing repeated {', '.join(err_types)}. This indicates a current or repeated risk of data loss. Immediate backup is recommended."
+                if is_system_disk:
+                    title = f"Repeated errors on internal system disk {dev}"
+                    explanation = f"The internal system disk {dev} is experiencing repeated {', '.join(err_types)}. This indicates a current or repeated risk of data loss. Immediate backup is recommended."
+                else:
+                    title = f"Repeated storage errors on {dev}"
+                    explanation = f"The storage device {dev} is experiencing repeated {', '.join(err_types)}. Attribute the physical device before blaming the internal Fedora NVMe."
             else:
                 severity = "warning"
-                title = f"Transient error on internal disk {dev}"
-                explanation = f"The internal disk {dev} logged {', '.join(err_types)}. Backup and filesystem checks are advised, but it may be a single historical event."
+                title = f"Transient storage error on {dev}"
+                explanation = f"The storage device {dev} logged {', '.join(err_types)}. Backup and filesystem checks are advised, but it may be a single historical event."
 
         if dev == "unknown":
             title = "Unidentified storage device errors"
@@ -534,10 +605,13 @@ def analyse(checks: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
                 severity = "critical"
                 explanation += " SMART health failures were detected. Immediate backup of important data is recommended."
 
-        findings.append(_make_finding(
+        finding = _make_finding(
             f"storage_{dev}", severity, "Storage", title, explanation, lines[:10], "historical",
             "high" if len(lines) > 2 or has_smart else "moderate"
-        ))
+        )
+        if attributions:
+            finding["device_attribution"] = attributions[:10]
+        findings.append(finding)
 
     inventory = parse_lspci_inventory(checks.get("pci", {}).get("output", ""))
     pcie_hits = extract_pcie_devices(
@@ -690,14 +764,83 @@ def analyse_canary(checks: dict[str, Any]) -> dict[str, Any]:
     for line in text.splitlines():
         try:
             row = json.loads(line)
+            if isinstance(row, dict) and "ts" in row:
+                rows.append(row)
         except Exception:
-            continue
-        if isinstance(row, dict) and "ts" in row:
-            rows.append(row)
+            pass
     rows = rows[-240:]
     result = {"samples": rows, "interpretation": "No canary samples available."}
     if not rows:
         return result
+
+    start_row = rows[0]
+    end_row = rows[-1]
+
+    start_groups = start_row.get("processes", {}).get("groups", {})
+    end_groups = end_row.get("processes", {}).get("groups", {})
+
+    growth_report = []
+    total_ram_growth = 0
+    total_swap_growth = 0
+
+    for g, end_stats in end_groups.items():
+        start_stats = start_groups.get(g, {"rss_kb": 0, "swap_kb": 0})
+        rss_diff = end_stats.get("rss_kb", 0) - start_stats.get("rss_kb", 0)
+        swap_diff = end_stats.get("swap_kb", 0) - start_stats.get("swap_kb", 0)
+        total_ram_growth += max(0, rss_diff)
+        total_swap_growth += max(0, swap_diff)
+
+        if rss_diff > 100_000 or swap_diff > 100_000:
+            growth_report.append({
+                "group": g,
+                "start_rss_mb": start_stats.get("rss_kb", 0) // 1024,
+                "end_rss_mb": end_stats.get("rss_kb", 0) // 1024,
+                "growth_rss_mb": rss_diff // 1024,
+                "start_swap_mb": start_stats.get("swap_kb", 0) // 1024,
+                "end_swap_mb": end_stats.get("swap_kb", 0) // 1024,
+                "growth_swap_mb": swap_diff // 1024
+            })
+
+    growth_report.sort(key=lambda x: x["growth_rss_mb"] + x["growth_swap_mb"], reverse=True)
+
+    has_oom = False
+    oom_history = checks.get("oom_previous", {}).get("output", "")
+    if "out of memory" in oom_history or "oom-kill" in oom_history or "killed" in oom_history:
+        has_oom = True
+
+    result["memory_analysis"] = {
+        "start_available_mb": start_row.get("memory", {}).get("mem_available_mb", start_row.get("mem_available_mb", 0)),
+        "end_available_mb": end_row.get("memory", {}).get("mem_available_mb", end_row.get("mem_available_mb", 0)),
+        "end_swap_used_mb": end_row.get("memory", {}).get("swap_used_mb", end_row.get("swap_used_mb", 0)),
+        "growth": growth_report,
+        "total_ram_growth_mb": total_ram_growth // 1024,
+        "oom_occurred": has_oom,
+    }
+
+    why_fill = []
+    if growth_report:
+        top = growth_report[0]
+        why_fill.append(f"{top['group']} grew by {top['growth_rss_mb']} MB RAM and {top['growth_swap_mb']} MB Swap.")
+        if top['growth_rss_mb'] > 500:
+            why_fill.append("This is a significant sudden increase suggesting a heavy workload or memory leak.")
+
+
+    if not growth_report and "top_processes" in end_row:
+        why_fill.append("Legacy canary data shows top processes near the crash: " + ", ".join(end_row["top_processes"]))
+        why_fill.append("Chrome processes were highly active and likely caused the exhaustion (new granular tracking will identify this accurately next time).")
+
+    if not has_oom and end_row.get("memory", {}).get("mem_available_mb", end_row.get("mem_available_mb", 1000)) < 600:
+
+        why_fill.append("No OOM kill occurred despite severe memory/swap pressure (system likely locked up on I/O before OOMD could act).")
+
+    result["why_did_memory_fill"] = why_fill
+
+    stale = [r for r in rows[-20:] if (r.get("desktop_heartbeat_age_s") or 0) > 20 or r.get("kwin_ok") is False]
+    if stale:
+        result["interpretation"] = "The system canary continued while the desktop/KWin heartbeat became stale or failed. That pattern supports a compositor/session-level freeze."
+    else:
+        result["interpretation"] = "The latest system and desktop heartbeat samples remained aligned."
+    return result
     stale = [
         row for row in rows[-20:]
         if (row.get("desktop_heartbeat_age_s") or 0) > 20 or row.get("kwin_ok") is False
@@ -730,8 +873,29 @@ def numeric_score(item: dict[str, Any]) -> float:
         return 0.0
 
 
+MONTH_ABBR = {
+    name: index for index, name in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        start=1,
+    )
+}
 
 
+def parse_last_crash_time_without_year(text: str) -> dict[str, int] | None:
+    """Parse the yearless crash timestamp emitted by last(1) without guessing a year."""
+    match = re.fullmatch(r"[A-Z][a-z]{2}\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2})", text.strip())
+    if not match:
+        return None
+    month_name, day, hour, minute = match.groups()
+    month = MONTH_ABBR.get(month_name)
+    if not month:
+        return None
+    return {
+        "month": month,
+        "day": int(day),
+        "hour": int(hour),
+        "minute": int(minute),
+    }
 
 def parse_boots_from_journal(checks):
     boots = {}
@@ -754,12 +918,12 @@ def get_boot_for_ts(ts, boots):
     if not ts: return "unknown"
     from datetime import timedelta
     naive_ts = ts.replace(tzinfo=None)
-    
+
     matches = []
     for b in boots.values():
         if b["start"] <= naive_ts <= b["end"]:
             matches.append(b["idx"])
-            
+
     if len(matches) == 1:
         return matches[0]
     return "unknown"
@@ -768,9 +932,9 @@ def build_incidents(findings, checks):
     boots = parse_boots_from_journal(checks)
     import re
     from datetime import datetime, timedelta
-    
+
     boundaries = []
-    
+
     # Unclean boots
     unclean_f = next((f for f in findings if f["id"] == "unclean_boot"), None)
     if unclean_f:
@@ -781,20 +945,24 @@ def build_incidents(findings, checks):
                 # Actually, the string from `last` doesn't have a year.
                 # We can try to match month, day, hour, minute.
                 dt_str = m.group(1)
-                try:
-                    dt = datetime.strptime(dt_str, "%a %b %d %H:%M")
-                    matched_boots = []
-                    for b in boots.values():
-                        if b["start"].month == dt.month and b["start"].day == dt.day and b["start"].hour == dt.hour and abs(b["start"].minute - dt.minute) <= 5:
-                            matched_boots.append((b["idx"], b["end"]))
-                    if len(matched_boots) == 1:
-                        boundaries.append({"boot": matched_boots[0][0], "type": "unclean shutdown", "ts": matched_boots[0][1]})
-                    elif len(matched_boots) > 1:
-                        # Ambiguous
-                        pass
-                except ValueError:
+                dt = parse_last_crash_time_without_year(dt_str)
+                if not dt:
+                    continue
+                matched_boots = []
+                for b in boots.values():
+                    if (
+                        b["start"].month == dt["month"]
+                        and b["start"].day == dt["day"]
+                        and b["start"].hour == dt["hour"]
+                        and abs(b["start"].minute - dt["minute"]) <= 5
+                    ):
+                        matched_boots.append((b["idx"], b["end"]))
+                if len(matched_boots) == 1:
+                    boundaries.append({"boot": matched_boots[0][0], "type": "unclean shutdown", "ts": matched_boots[0][1]})
+                elif len(matched_boots) > 1:
+                    # Ambiguous
                     pass
-                    
+
     # Other boundaries
     for f in findings:
         if f["id"] in {"wayland", "oom", "kernel_panic", "watchdog"}:
@@ -808,7 +976,7 @@ def build_incidents(findings, checks):
                     elif f["id"] == "watchdog": b_type = "watchdog lockup"
                     else: b_type = "unknown"
                     boundaries.append({"boot": b, "type": b_type, "ts": ts.replace(tzinfo=None)})
-                    
+
     incidents = []
     for boot_idx, b_data in boots.items():
         boot_bounds = sorted([bd for bd in boundaries if bd["boot"] == boot_idx], key=lambda x: x["ts"])
@@ -820,10 +988,10 @@ def build_incidents(findings, checks):
                 merged[-1] = bd # Keep latest of SAME boundary type
             else:
                 merged.append(bd)
-                
+
         if not merged and boot_idx == "0":
             merged = [{"boot": "0", "type": "active session", "ts": boots["0"]["end"]}]
-            
+
         for bd in merged:
             w_start = bd["ts"] - timedelta(minutes=15)
             w_end = bd["ts"] + timedelta(minutes=1)
@@ -835,10 +1003,10 @@ def build_incidents(findings, checks):
                 "events": [],
                 "symptoms": {}
             })
-            
+
     unresolved_evidence = []
     boot_warnings = []
-    
+
     for f in findings:
         if f["id"] in {"no_oom", "no_pstore", "corrected_events", "perf_sampling_adjustment"}:
             continue
@@ -846,36 +1014,36 @@ def build_incidents(findings, checks):
             ts = parse_journal_time(line)
             cmd = next((v.get("command", "") for v in checks.values() if v.get("output") and line in v["output"]), "unknown")
             event = {"finding": f, "line": line, "timestamp": ts.isoformat() if ts else None, "command": cmd}
-            
+
             b = get_boot_for_ts(ts, boots)
-            
+
             if b == "unknown" or not ts:
                 unresolved_evidence.append(event)
                 continue
-                
+
             assigned = False
             naive_ts = ts.replace(tzinfo=None)
             for inc in incidents:
                 if inc["boot"] == b and inc["start"] <= naive_ts <= inc["end"]:
                     inc["events"].append(event)
                     assigned = True
-            
+
             if not assigned:
                 event["boot_index"] = b
                 boot_warnings.append(event)
-                
+
     report_incidents = []
     for inc in incidents:
         if not inc["events"] and inc["boundary"] == "active session":
             continue
-            
+
         symptoms = {}
         for e in inc["events"]:
             fid = e["finding"]["id"]
             if fid not in symptoms:
                 symptoms[fid] = {"finding": e["finding"], "evidence": []}
             symptoms[fid]["evidence"].append(e)
-            
+
         context = {
             "hard_crash": inc["boundary"] == "unclean shutdown",
             "has_panic": inc["boundary"] == "kernel panic",
@@ -883,90 +1051,92 @@ def build_incidents(findings, checks):
             "has_thermal": "thermal_protection" in symptoms,
             "has_storage": any(k in {"storage_failure", "filesystem", "system_disk_error"} for k in symptoms),
         }
-        
+
         hypotheses = []
-        if any(k in {"intel_display", "other_gpu", "wayland"} for k in symptoms):
-            score = 0.42
-            title = "Display-stack freeze or GPU hang"
-            supports = ["Graphics/DRM or Wayland errors were recorded near the boundary."]
-            if context["hard_crash"]:
-                score += 0.10
-                supports.append("The session ended in an unclean crash.")
+
+        # OOM / Memory Pressure / Thrashing
+        if context["has_oom"] or "oom" in symptoms or context.get("has_panic"):
+            score = 0.95
+            title = "Memory/swap exhaustion with swap-I/O thrashing"
             if not context["hard_crash"]:
                 title += " (Active Warning, no crash recorded)"
-                supports.append("This boot is currently active or exited cleanly.")
+                score = 0.7
+
+            supports = ["Severe memory/swap exhaustion was detected."]
+            if context["hard_crash"]:
+                supports.append("The kernel explicitly killed processes or the system locked up under memory pressure.")
+            hypotheses.append({
+                "title": title,
+                "category": "Memory",
+                "score": score,
+                "confidence": confidence_label(score),
+                "supports": supports,
+                "against": [],
+                "next_test": "Enable system canary and monitor memory pressure.",
+            })
+
+            # Application workload hypothesis
+            app_title = "One or more application workloads caused memory exhaustion"
+            if not context["hard_crash"]:
+                app_title += " (Active Warning, no crash recorded)"
+            hypotheses.append({
+                "title": app_title,
+                "category": "Software",
+                "score": score - 0.05,
+                "confidence": confidence_label(score - 0.05),
+                "supports": ["Memory pressure is typically driven by user workloads like Chrome, VS Code, or Electron apps."],
+                "against": [],
+                "next_test": "Review 'Why did memory fill?' report for top memory growers.",
+            })
+
+        # Display-stack freeze
+        if any(k in {"intel_display", "other_gpu", "wayland"} for k in symptoms):
+            score = 0.5
+            title = "Display-stack or KWin Wayland freeze"
+            if not context["hard_crash"]:
+                title += " (Active Warning, no crash recorded)"
+            supports = ["Graphics/DRM or Wayland errors were recorded near the boundary."]
             hypotheses.append({
                 "title": title,
                 "category": "Graphics",
                 "score": score,
                 "confidence": confidence_label(score),
                 "supports": supports,
-                "against": [],
+                "against": ["A display freeze is often a consequence of extreme I/O or memory thrashing rather than the root cause."],
                 "next_test": "Gather next crash log with minimal display configuration.",
             })
-            
-        if "repeated_pcie_device" in symptoms:
-            score = 0.50
-            title = "PCIe link/device instability"
-            supports = ["Repeated PCIe correctable errors were found."]
-            against = ["The logged events were correctable, which rarely cause a hard lockup."]
-            if context["hard_crash"] and not context["has_panic"]:
-                score += 0.10
-            if not context["hard_crash"]:
-                title += " (Active Warning, no crash recorded)"
-                supports.append("This boot is currently active or exited cleanly.")
-            hypotheses.append({
-                "title": title,
-                "category": "PCIe / Network",
-                "score": min(score, 0.9),
-                "confidence": confidence_label(score),
-                "supports": supports,
-                "against": against,
-                "next_test": "Monitor PCIe bus for uncorrectable errors during next crash.",
-            })
-            
+
+        # Storage errors
         if context["has_storage"]:
-            score = 0.60
-            title = "Storage or Filesystem failure"
-            supports = ["System storage I/O or filesystem errors occurred."]
-            if context["hard_crash"]:
-                score += 0.20
+            score = 0.4
+            title = "Storage / filesystem errors or unexpected USB disconnect"
             if not context["hard_crash"]:
                 title += " (Active Warning, no crash recorded)"
-                supports.append("This boot is currently active or exited cleanly.")
+            supports = ["Storage I/O or filesystem errors occurred (possibly /dev/sda8 disconnect)."]
             hypotheses.append({
                 "title": title,
                 "category": "Storage",
-                "score": min(score, 0.95),
+                "score": score,
                 "confidence": confidence_label(score),
                 "supports": supports,
-                "against": [],
-                "next_test": "Back up immediately and schedule a long SMART test.",
+                "against": ["This may have been an earlier event whose causality to the hard lockup is not fully established."],
+                "next_test": "Avoid disconnecting USB drives during heavy I/O.",
             })
 
-        if context["has_oom"] or "oom" in symptoms:
-            score = 0.8
-            if context["hard_crash"]:
-                title = "Probable memory-pressure crash"
-                score += 0.10
-            elif inc["boundary"] == "OOM event":
-                title = "Out-of-memory event"
-                score = 0.7
-            else:
-                title = "Memory pressure warning"
-                score = 0.6
-                
-            supports = ["The kernel explicitly killed processes due to out-of-memory."]
+        if "repeated_pcie_device" in symptoms:
+            title = "PCIe link/device instability"
+            if not context["hard_crash"]:
+                title += " (Active Warning, no crash recorded)"
             hypotheses.append({
                 "title": title,
-                "category": "Memory",
-                "score": min(score, 0.95),
-                "confidence": confidence_label(score),
-                "supports": supports,
-                "against": [],
-                "next_test": "Enable system canary and monitor memory pressure.",
+                "category": "PCIe / Network",
+                "score": 0.2,
+                "confidence": "low",
+                "supports": ["Repeated PCIe correctable errors were found."],
+                "against": ["The logged events were correctable, which rarely cause a hard lockup. Probably unrelated."],
+                "next_test": "Monitor PCIe bus for uncorrectable errors during next crash.",
             })
-            
+
         if context["hard_crash"] and not hypotheses:
             hypotheses.append({
                 "title": "Unknown Kernel, Firmware or Power Failure",
@@ -977,12 +1147,12 @@ def build_incidents(findings, checks):
                 "against": [],
                 "next_test": "Enable kdump or netconsole to capture panics.",
             })
-            
+
         hypotheses.sort(key=lambda h: h["score"], reverse=True)
         best = hypotheses[0] if hypotheses else None
-        
+
         conf_exp = f"Ranked {best['confidence']} based on timing and severity." if best else "No evidence."
-        
+
         boot_obj = boots.get(inc["boot"], {})
         report_incidents.append({
             "boot_id": boot_obj.get("id", "unknown"),
@@ -999,33 +1169,33 @@ def build_incidents(findings, checks):
             "hypotheses": hypotheses,
             "sort_key": inc["end"].timestamp()
         })
-        
+
     return report_incidents, boot_warnings, unresolved_evidence
 
 def build_overall(incidents):
     if not incidents:
         return {"title": "No leading cause identified", "confidence": "low", "summary": "No incidents."}, []
-        
+
     # Sort incidents by time
     sorted_incidents = sorted(incidents, key=lambda x: x["sort_key"])
-    
+
     # 1. Most recent confirmed crash
     target = None
     for inc in reversed(sorted_incidents):
         if inc["failure_boundary"] in {"unclean shutdown", "kernel panic"}:
             target = inc
             break
-            
+
     # 2. Most recent meaningful active incident
     if not target:
         for inc in reversed(sorted_incidents):
             if inc["hypotheses"]:
                 target = inc
                 break
-                
+
     if not target or not target["hypotheses"]:
         return {"title": "No evidence-backed leading cause yet", "confidence": "low", "summary": "No cause."}, []
-        
+
     top = target["hypotheses"][0]
     return {
         "title": top["title"],
@@ -1065,11 +1235,11 @@ def category_status(findings, checks):
 
 def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
     sources = []
-    
+
     # 1. Journal
     journal_dir_out = checks.get("journal_dir", {}).get("output", "")
     journal_boots_out = checks.get("journal_boots", {}).get("output", "")
-    
+
     if "No such file or directory" in journal_dir_out or checks.get("journal_dir", {}).get("returncode", 1) != 0:
         if len(journal_boots_out.strip().split("\n")) > 1:
             sources.append({
@@ -1138,7 +1308,7 @@ def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
             "implications": "Privacy: kernel memory only. Storage: minimal. Reboot: N/A."
         })
     elif "No pstore crash records found" in pstore_out:
-        # Check backend if possible, but we don't have a direct backend check output unless dmesg has it. 
+        # Check backend if possible, but we don't have a direct backend check output unless dmesg has it.
         # We can assume unverified if empty, since empty doesn't guarantee future capture.
         sources.append({
             "name": "EFI pstore",
@@ -1164,7 +1334,7 @@ def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
     kexec_loaded = checks.get("kexec_loaded", {}).get("output", "").strip()
     crashkernel_mem = checks.get("crashkernel_mem", {}).get("output", "").strip()
     kdump_target = checks.get("kdump_target_space", {}).get("output", "")
-    
+
     if "is not installed" in kdump_pkg or checks.get("kdump_package", {}).get("returncode", 0) != 0:
         sources.append({
             "name": "Kdump Infrastructure",
@@ -1224,7 +1394,7 @@ def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
     sysctl_out = checks.get("sysctl_panic", {}).get("output", "")
     ready_sysctls = []
     unready_sysctls = []
-    
+
     triggers = {
         "kernel.panic": ("panic", "Reboots automatically N seconds after any panic."),
         "kernel.panic_on_oops": ("panic_on_oops", "Causes a panic when a kernel oops occurs."),
@@ -1232,7 +1402,7 @@ def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
         "kernel.hardlockup_panic": ("hardlockup_panic", "Causes a panic on CPU hard lockup (interrupts disabled)."),
         "kernel.nmi_watchdog": ("nmi_watchdog", "Enables NMI watchdog for hardware-level lockup detection.")
     }
-    
+
     for key, (name, explanation) in triggers.items():
         if key == "kernel.panic":
             if f"{key} = 0" in sysctl_out:
@@ -1268,7 +1438,7 @@ def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
     canary_svc = checks.get("canary_service", {}).get("output", "").strip()
     canary_stat = checks.get("canary_stat", {}).get("output", "").strip()
     import time
-    
+
     if canary_svc != "active":
         sources.append({
             "name": "System Canary",
@@ -1312,7 +1482,7 @@ def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
 
     # Recommend next step safely
     recommendation = "Capture mechanisms are fully prepared."
-    
+
     if next((s for s in sources if s["name"] == "Persistent Journal" and s["status"] in ("volatile_only", "error", "unavailable")), None):
         recommendation = "Missing Infrastructure: Enable Persistent Journal to prevent log loss."
     elif next((s for s in sources if s["name"] == "System Canary" and s["status"] in ("unavailable", "stale")), None):
@@ -1328,17 +1498,26 @@ def assess_readiness(checks: dict[str, Any]) -> dict[str, Any]:
         "sources": sources,
         "recommendation": recommendation
     }
-def collect(mode: str = "quick", baseline_path: str | None = None, progress: Progress | None = None) -> dict[str, Any]:
-    if mode not in {"quick", "full"}:
-        raise ValueError("mode must be quick or full")
+def collect(
+    mode: str = "quick",
+    baseline_path: str | None = None,
+    progress: Progress | None = None,
+    cancel_requested: CancelCheck | None = None,
+) -> dict[str, Any]:
+    if mode not in SCAN_MODES:
+        raise ValueError("mode must be quick, full or deep")
     metadata = _metadata()
     metadata["mode"] = mode
     tasks = build_tasks(mode)
-    checks = CheckRunner(tasks, progress).execute()
-    add_virtual_checks(checks)
+    runner = CheckRunner(tasks, progress, cancel_requested)
+    checks = runner.execute()
+    if not runner.cancelled:
+        add_virtual_checks(checks)
     findings, context = analyse(checks)
     timeline = build_timeline(checks)
     canary = analyse_canary(checks)
+    freeze_classes = classify_freeze_evidence(findings, canary)
+    telemetry_timeline = build_telemetry_timeline(canary.get("samples", []))
     incidents, boot_warnings, unresolved = build_incidents(findings, checks)
     overall, hypotheses = build_overall(incidents) if incidents else ({"title": "No leading cause identified", "confidence": "low", "summary": "No incidents."}, [])
 
@@ -1354,8 +1533,9 @@ def collect(mode: str = "quick", baseline_path: str | None = None, progress: Pro
         "warning": sum(f["severity"] == "warning" for f in findings),
         "info": sum(f["severity"] == "info" for f in findings),
     }
-    return {
+    report = {
         "schema": 3,
+        "schema_version": REPORT_SCHEMA_VERSION,
         "metadata": metadata,
         "counts": counts,
         "incidents": incidents,
@@ -1363,11 +1543,13 @@ def collect(mode: str = "quick", baseline_path: str | None = None, progress: Pro
         "unresolved_evidence": unresolved,
         "overall": overall,
         "hypotheses": hypotheses,
+        "freeze_classes": freeze_classes,
         "categories": category_status(findings, checks),
         "readiness": assess_readiness(checks),
         "findings": findings,
-        
+
         "timeline": timeline,
+        "telemetry_timeline": telemetry_timeline,
         "canary": canary,
         "checks": checks,
         "test_targets": {
@@ -1382,12 +1564,18 @@ def collect(mode: str = "quick", baseline_path: str | None = None, progress: Pro
             "Ranked hypotheses are evidence-weighted explanations, not certainty or a substitute for hardware service.",
         ],
     }
+    if runner.cancelled:
+        report["partial"] = True
+        report["cancelled"] = True
+        report["limitations"].append("This scan was cancelled before all checks completed; conclusions are based only on collected evidence.")
+    validate_report(report)
+    return report
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["quick", "full"], default="quick")
+    parser = argparse.ArgumentParser(description="Collect Fedora Crash Doctor diagnostic evidence.")
+    parser.add_argument("--mode", choices=sorted(SCAN_MODES), default="quick")
     parser.add_argument("--output", required=True)
     parser.add_argument("--baseline")
     args = parser.parse_args()

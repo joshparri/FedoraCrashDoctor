@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Added `HISTORY.md` with the full Fedora/Linux crash and freeze master record,
+  including diagnosis rankings, chronology, recovery procedure, and current
+  improvement priorities.
+- Linked the master record from the README.
+- Added `TODO.md` with the release-hardening worklist and linked it from the
+  README.
+- Added a read-only host stability audit for live AVANCE-WS7 prevention checks.
+- Added an explicit CLI mode with `--help`, `--version`, and `--cli --scan`.
+- Split expensive RPM file verification into explicit `deep` scan mode so
+  ordinary full scans stay more responsive.
+- Added `validate_release.sh` for broad, CI-friendly best-effort validation.
+- Added a repository desktop file for installer and packaging validation.
+- Moved manual diagnostic experiments under `tools/manual/` so root-level
+  unittest discovery no longer imports them as tests.
+
 ## 3.1.0 — 2026-07-29
 
 - Added issue-specific Fix / next steps cards with command copy/run/explain controls.

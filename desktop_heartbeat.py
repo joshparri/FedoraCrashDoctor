@@ -29,6 +29,20 @@ def kwin_ping() -> bool | None:
         return False
 
 
+def process_present(name: str) -> bool:
+    proc_dir = Path("/proc")
+    for path in proc_dir.iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            comm = (path / "comm").read_text(errors="replace").strip()
+            if comm == name:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def atomic_write(path: Path, payload: dict) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="heartbeat-", dir=path.parent)
@@ -54,6 +68,7 @@ def main() -> int:
             "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "epoch": time.time(),
             "kwin_ok": kwin_ping(),
+            "plasmashell_ok": process_present("plasmashell"),
             "session": os.environ.get("XDG_SESSION_TYPE", "unknown"),
             "desktop": os.environ.get("XDG_CURRENT_DESKTOP", "unknown"),
         }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import argparse
 import json
 import os
 import re
@@ -13,6 +14,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+
+from version import app_version
+from report_schema import migrate_report
 
 from PySide6.QtCore import QObject, QProcess, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
@@ -27,7 +31,7 @@ from PySide6.QtWidgets import (
 APP_DIR = Path(__file__).resolve().parent
 INSTALLED_HELPER = Path("/usr/libexec/fedora-crash-doctor/fedora-crash-doctor-helper")
 HELPER = INSTALLED_HELPER if INSTALLED_HELPER.exists() else APP_DIR / "privileged_helper.py"
-VERSION = "3.0.0"
+VERSION = app_version()
 SEVERITY_ICON = {"critical": "🔴", "warning": "🟠", "info": "🔵"}
 STATUS_ICON = {"new": "NEW", "recurring": "Recurring"}
 
@@ -82,6 +86,11 @@ class PrivilegeBroker(QObject):
 
         self.ensure(send_request)
         return request_id
+
+    def cancel_request(self, request_id: str) -> None:
+        if self.process and self.process.state() == QProcess.ProcessState.Running:
+            payload = {"action": "cancel", "target_id": request_id}
+            self.process.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
 
     def cancel_all(self) -> None:
         self.cancelling = True
@@ -852,20 +861,47 @@ class MainWindow(QMainWindow):
             self.set_status(label)
 
     def progress_update(self, current: int, total: int, label: str) -> None:
+        import time
+        now = time.monotonic()
+        if not hasattr(self, "scan_start_time"):
+            self.scan_start_time = now
+            self.current_check_start = now
+            self.current_check_label = label
+            
+        if getattr(self, "current_check_label", "") != label:
+            self.current_check_label = label
+            self.current_check_start = now
+
+        overall_elapsed = int(now - self.scan_start_time)
+        check_elapsed = int(now - self.current_check_start)
+        
+        overall_str = f"{overall_elapsed//60}:{overall_elapsed%60:02d}"
+        check_str = f"{check_elapsed//60}:{check_elapsed%60:02d}"
+
         percent = int(current * 100 / total) if total else 0
         self.progress.setRange(0, 100); self.progress.setValue(percent)
-        self.set_status(f"{label} — {current}/{total}")
+        self.set_status(f"{label} ({current}/{total}) — Overall: {overall_str} | Check: {check_str}")
 
     def cancel_action(self) -> None:
-        if QMessageBox.question(self, "Cancel?", "Cancel the current privileged action? The helper will close and the next action will ask for authorisation again.") == QMessageBox.StandardButton.Yes:
-            self.broker.cancel_all(); self.set_busy(False, "Cancelled.")
+        if QMessageBox.question(self, "Cancel?", "Cancel the current action? Scans will complete their current check and return a partial report.") == QMessageBox.StandardButton.Yes:
+            if hasattr(self, "active_request_id") and self.active_request_id:
+                self.broker.cancel_request(self.active_request_id)
+                self.active_request_id = None
+                self.set_busy(False, "Cancelling scan...")
+            else:
+                self.broker.cancel_all(); self.set_busy(False, "Cancelled.")
 
     def run_scan(self, mode: str) -> None:
+        import time
         self.set_busy(True, f"Starting {mode} scan…")
-        self.broker.request("scan", {"mode": mode}, self.scan_finished, self.progress_update)
+        self.scan_start_time = time.monotonic()
+        self.current_check_label = ""
+        self.current_check_start = self.scan_start_time
+        self.active_request_id = self.broker.request("scan", {"mode": mode}, self.scan_finished, self.progress_update)
 
     def scan_finished(self, ok: bool, data: Any) -> None:
         self.set_busy(False)
+        self.active_request_id = None
         if not ok:
             if str(data) != "Cancelled.":
                 QMessageBox.warning(self, "Scan failed", str(data))
@@ -881,6 +917,11 @@ class MainWindow(QMainWindow):
 
     def load_report(self) -> None:
         if not self.report: return
+        try:
+            self.report = migrate_report(self.report)
+        except Exception as exc:
+            self.set_status(f"Error migrating report: {exc}")
+            return
         overall = self.report.get("overall", {})
         self.overall_title.setText(overall.get("title", "No leading cause identified"))
         self.overall_summary.setText(overall.get("summary", ""))
@@ -1015,7 +1056,7 @@ class MainWindow(QMainWindow):
         checks = list(self.report.get("checks", {}).items()) if self.report else []
         self.checks_table.setRowCount(len(checks))
         for row, (key, item) in enumerate(checks):
-            values = [item.get("category", ""), item.get("title", key), item.get("status", ""), f"{item.get('duration_seconds',0)} s"]
+            values = [item.get("category", ""), item.get("title", key), item.get("state", item.get("status", "")), f"{item.get('duration_seconds',0)} s"]
             for col, value in enumerate(values): self.checks_table.setItem(row, col, QTableWidgetItem(str(value)))
             self.checks_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, (key, item))
         if checks: self.checks_table.selectRow(0)
@@ -1025,7 +1066,7 @@ class MainWindow(QMainWindow):
         if row < 0: return
         key, item = self.checks_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         self.check_output.setPlainText(
-            f"{item.get('title',key)}\nCategory: {item.get('category','')}\nStatus: {item.get('status')} (return {item.get('returncode')})\nCommand: {item.get('command')}\n\n{item.get('output','')}"
+            f"{item.get('title',key)}\nCategory: {item.get('category','')}\nState: {item.get('state', item.get('status', ''))} (return {item.get('returncode')})\nCommand: {item.get('command')}\n\n{item.get('output','')}"
         )
 
     def enable_capture(self) -> None:
@@ -1240,12 +1281,63 @@ body{{font-family:system-ui;max-width:1180px;margin:30px auto;padding:0 18px;bac
         super().closeEvent(event)
 
 
-def main() -> int:
+def gui_main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Fedora Crash Doctor")
     app.setOrganizationName("Fedora Crash Doctor")
     window = MainWindow(); window.show()
     return app.exec()
+
+
+def cli_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="fedora_crash_doctor.py",
+        description="Fedora Crash Doctor diagnostics.",
+        epilog=(
+            "Examples:\n"
+            "  python3 fedora_crash_doctor.py --cli --scan --mode quick --output scan.json\n"
+            "  python3 fedora_crash_doctor.py --cli --scan --mode deep --output deep-scan.json\n"
+            "  python3 fedora_crash_doctor.py --version"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="store_true", help="print the Fedora Crash Doctor version and exit")
+    parser.add_argument("--cli", action="store_true", help="run in command-line mode instead of launching the GUI")
+    parser.add_argument("--scan", action="store_true", help="collect a diagnostic scan in CLI mode")
+    parser.add_argument("--mode", choices=["quick", "full", "deep"], default="quick", help="scan depth; deep includes expensive maintenance checks")
+    parser.add_argument("--output", help="write scan JSON to this path")
+    parser.add_argument("--baseline", help="optional previous scan JSON used to mark recurring findings")
+    args = parser.parse_args(argv)
+
+    if args.version:
+        print(f"Fedora Crash Doctor {VERSION}")
+        return 0
+    if not args.cli:
+        parser.error("unknown GUI arguments; run with no arguments to launch the GUI, or use --cli for terminal mode")
+    if not args.scan:
+        parser.error("--cli currently requires --scan")
+    if not args.output:
+        parser.error("--scan requires --output PATH")
+
+    from collector import collect
+
+    started = datetime.now()
+
+    def progress(current: int, total: int, label: str) -> None:
+        elapsed = int((datetime.now() - started).total_seconds())
+        print(f"[{current}/{total}] {label} ({elapsed}s elapsed)", file=sys.stderr)
+
+    report = collect(args.mode, args.baseline, progress)
+    Path(args.output).write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    print(args.output)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv:
+        return cli_main(argv)
+    return gui_main()
 
 
 if __name__ == "__main__":

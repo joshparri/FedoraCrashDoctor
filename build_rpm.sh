@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-VERSION=3.0.0
 NAME=fedora-crash-doctor
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+VERSION="$(sed 's/-.*//' "$SOURCE_DIR/VERSION")"
 TOPDIR="${HOME}/rpmbuild"
 
 if ! command -v rpmbuild >/dev/null 2>&1; then

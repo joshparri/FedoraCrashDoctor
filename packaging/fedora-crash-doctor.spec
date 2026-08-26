@@ -1,5 +1,5 @@
 Name:           fedora-crash-doctor
-Version:        3.0.0
+Version:        3.2.0
 Release:        1%{?dist}
 Summary:        Evidence-weighted crash diagnostics for Fedora
 License:        MIT
@@ -42,8 +42,9 @@ KWin heartbeats, controlled tests, and a locked-down PolicyKit helper.
 
 %install
 install -d %{buildroot}%{_datadir}/fedora-crash-doctor
-install -m 0755 fedora_crash_doctor.py collector.py canary.py desktop_heartbeat.py autoscan.py %{buildroot}%{_datadir}/fedora-crash-doctor/
-install -m 0644 README.md LICENSE CHANGELOG.md %{buildroot}%{_datadir}/fedora-crash-doctor/
+install -m 0755 fedora_crash_doctor.py collector.py canary.py desktop_heartbeat.py autoscan.py host_stability_audit.py %{buildroot}%{_datadir}/fedora-crash-doctor/
+install -m 0755 device_inventory.py freeze_classifiers.py report_schema.py safe_mitigation.py telemetry_timeline.py version.py %{buildroot}%{_datadir}/fedora-crash-doctor/
+install -m 0644 VERSION README.md LICENSE CHANGELOG.md HISTORY.md TODO.md %{buildroot}%{_datadir}/fedora-crash-doctor/
 
 install -d %{buildroot}%{_libexecdir}/fedora-crash-doctor
 install -m 0755 privileged_helper.py %{buildroot}%{_libexecdir}/fedora-crash-doctor/fedora-crash-doctor-helper
@@ -64,19 +65,7 @@ EOF
 chmod 0755 %{buildroot}%{_bindir}/fedora-crash-doctor
 
 install -d %{buildroot}%{_datadir}/applications
-cat >%{buildroot}%{_datadir}/applications/fedora-crash-doctor.desktop <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Fedora Crash Doctor
-GenericName=Crash Diagnostics
-Comment=Evidence-weighted hardware and software crash diagnostics
-Exec=fedora-crash-doctor
-Icon=utilities-system-monitor
-Terminal=false
-Categories=System;
-Keywords=crash;diagnostics;hardware;logs;fedora;kdump;smart;
-StartupNotify=true
-EOF
+install -m 0644 packaging/fedora-crash-doctor.desktop %{buildroot}%{_datadir}/applications/
 
 %post
 %systemd_post fedora-crash-doctor-canary.service fedora-crash-doctor-autoscan.service
@@ -90,7 +79,7 @@ systemctl --global enable fedora-crash-doctor-desktop-heartbeat.service >/dev/nu
 
 %files
 %license LICENSE
-%doc README.md CHANGELOG.md
+%doc README.md CHANGELOG.md HISTORY.md TODO.md
 %{_bindir}/fedora-crash-doctor
 %{_datadir}/fedora-crash-doctor/
 %{_libexecdir}/fedora-crash-doctor/
@@ -101,5 +90,8 @@ systemctl --global enable fedora-crash-doctor-desktop-heartbeat.service >/dev/nu
 %{_datadir}/applications/fedora-crash-doctor.desktop
 
 %changelog
+* Wed Aug 26 2026 Fedora Crash Doctor contributors <noreply@example.invalid> - 3.2.0-1
+- Add host stability audit, explicit CLI, report schema checks and deep scan mode
+
 * Wed Jul 29 2026 Fedora Crash Doctor contributors <noreply@example.invalid> - 3.0.0-1
 - Initial packaged v3 release

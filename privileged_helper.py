@@ -26,8 +26,11 @@ from typing import Any, Callable
 
 APP_DIR = Path(__file__).resolve().parent
 SHARE_DIR = Path("/usr/share/fedora-crash-doctor")
-sys.path.insert(0, str(SHARE_DIR if SHARE_DIR.exists() else APP_DIR))
+sys.path.insert(0, str(APP_DIR))
+if SHARE_DIR.exists():
+    sys.path.insert(1, str(SHARE_DIR))
 from collector import collect, discover_smart_devices  # noqa: E402
+from version import app_version  # noqa: E402
 
 STATE_DIR = Path("/var/lib/fedora-crash-doctor")
 CONFIG_DIR = Path("/etc/fedora-crash-doctor")
@@ -335,7 +338,12 @@ def dispatch(req: dict[str, Any], uid: int, gid: int, home: str, request_id: str
         mode = params.get("mode", "quick")
         if mode not in {"quick", "full"}:
             raise ValueError("Invalid scan mode")
-        report = collect(mode, baseline_path(uid), progress)
+        
+        state = req.get("state", {})
+        def cancel_requested() -> bool:
+            return state.get("cancel_flag", False)
+
+        report = collect(mode, baseline_path(uid), progress, cancel_requested)
         save_baseline(uid, report)
         return report
     if action == "capture_status":
@@ -366,6 +374,19 @@ def dispatch(req: dict[str, Any], uid: int, gid: int, home: str, request_id: str
     raise ValueError("Action is not allowed")
 
 
+import threading
+
+active_tasks = {}
+
+def _dispatch_thread(req: dict[str, Any], uid: int, gid: int, home: str, request_id: str):
+    try:
+        data = dispatch(req, uid, gid, home, request_id)
+        send({"type": "result", "id": request_id, "ok": True, "data": data})
+    except Exception as exc:
+        send({"type": "result", "id": request_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    finally:
+        active_tasks.pop(request_id, None)
+
 def broker() -> int:
     if os.geteuid() != 0:
         print("This helper must be run through pkexec.", file=sys.stderr)
@@ -374,7 +395,7 @@ def broker() -> int:
     install_parent_death_signal()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(STATE_DIR, 0o755)
-    send({"type": "ready", "uid": uid, "username": username, "version": "3.0.0"})
+    send({"type": "ready", "uid": uid, "username": username, "version": app_version()})
     for raw in sys.stdin:
         if len(raw) > MAX_REQUEST:
             send({"type": "error", "id": None, "error": "Request too large"})
@@ -383,11 +404,25 @@ def broker() -> int:
             req = json.loads(raw)
             if not isinstance(req, dict):
                 raise ValueError("Request must be an object")
+            
+            action = req.get("action")
+            if action == "cancel":
+                target_id = req.get("target_id")
+                task = active_tasks.get(target_id)
+                if task:
+                    task["cancel_flag"] = True
+                continue
+                
             request_id = str(req.get("id", ""))[:80]
             if not request_id:
                 raise ValueError("Request id required")
-            data = dispatch(req, uid, gid, home, request_id)
-            send({"type": "result", "id": request_id, "ok": True, "data": data})
+                
+            state = {"cancel_flag": False}
+            req["state"] = state
+            active_tasks[request_id] = state
+            
+            t = threading.Thread(target=_dispatch_thread, args=(req, uid, gid, home, request_id), daemon=True)
+            t.start()
         except Exception as exc:
             send({"type": "result", "id": str(locals().get("request_id", "")), "ok": False, "error": f"{type(exc).__name__}: {exc}"})
     return 0

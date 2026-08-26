@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Fedora Crash Doctor
+GenericName=Crash Diagnostics
+Comment=Evidence-weighted hardware and software crash diagnostics
+Exec=fedora-crash-doctor
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;
+Keywords=crash;diagnostics;hardware;logs;fedora;kdump;smart;
+StartupNotify=true

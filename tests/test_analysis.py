@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from collector import analyse, analyse_canary, build_incidents, build_overall, build_timeline, extract_pcie_devices, parse_lspci_inventory
+from collector import analyse, analyse_canary, build_incidents, build_overall, build_tasks, build_timeline, extract_pcie_devices, parse_last_crash_time_without_year, parse_lspci_inventory
 
 
 def check(title, output, category="Software", status="ok"):
@@ -60,7 +60,7 @@ class AnalysisTests(unittest.TestCase):
         findings, _ = analyse(checks)
         incidents, boot_warnings, unresolved = build_incidents(findings, checks)
         self.assertEqual(len(incidents), 1)
-        self.assertTrue("Display-stack freeze" in incidents[0]["strongest_hypothesis"])
+        self.assertTrue("Display-stack or KWin Wayland freeze" in incidents[0]["strongest_hypothesis"])
 
     def test_old_i915_message_unrelated_to_current_incident(self):
         checks = {
@@ -95,7 +95,7 @@ class AnalysisTests(unittest.TestCase):
         findings, _ = analyse(checks)
         incidents, boot_warnings, unresolved = build_incidents(findings, checks)
         self.assertEqual(len(incidents), 2)
-        self.assertTrue("Out-of-memory" in incidents[0]["strongest_hypothesis"] or "Out-of-memory" in incidents[1]["strongest_hypothesis"] or "memory-pressure" in incidents[0]["strongest_hypothesis"] or "memory-pressure" in incidents[1]["strongest_hypothesis"])
+        self.assertTrue("Memory/swap exhaustion with swap-I/O thrashing" in incidents[0]["strongest_hypothesis"] or "Memory/swap exhaustion with swap-I/O thrashing" in incidents[1]["strongest_hypothesis"] or "memory-pressure" in incidents[0]["strongest_hypothesis"] or "memory-pressure" in incidents[1]["strongest_hypothesis"])
 
     def test_multiple_unrelated_warnings_same_boot(self):
         checks = {
@@ -183,7 +183,7 @@ class AnalysisTests(unittest.TestCase):
         storage = [f for f in findings if f["id"] == "storage_nvme0n1"]
         self.assertEqual(len(storage), 1)
         self.assertEqual(storage[0]["severity"], "critical")
-        self.assertIn("Immediate backup", storage[0]["explanation"])
+        self.assertIn("Attribute the physical device", storage[0]["explanation"])
 
     def test_single_removable_drive_error_is_info(self):
         checks = {
@@ -261,6 +261,16 @@ class AnalysisTests(unittest.TestCase):
         findings, _ = analyse(checks)
         incidents, boot_warnings, unresolved = build_incidents(findings, checks)
         self.assertEqual(len(incidents), 0)
+
+    def test_yearless_last_timestamp_parser(self):
+        parsed = parse_last_crash_time_without_year("Wed Jul 29 12:26")
+        self.assertEqual(parsed, {"month": 7, "day": 29, "hour": 12, "minute": 26})
+        self.assertIsNone(parse_last_crash_time_without_year("not a crash timestamp"))
+
+    def test_build_tasks_has_unique_keys(self):
+        for mode in ("quick", "full"):
+            keys = [task.key for task in build_tasks(mode)]
+            self.assertEqual(len(keys), len(set(keys)))
 
     def test_adjacent_boots_do_not_receive_same_event(self):
         checks = {
@@ -357,7 +367,7 @@ class AnalysisTests(unittest.TestCase):
         # The OOM event at 12:21 should ALSO be in the crash window (12:11 to 12:27)
         self.assertTrue(any("Out of memory" in e["line"] for e in crash_inc["incident_evidence"]))
         
-        self.assertEqual(crash_inc["strongest_hypothesis"], "Probable memory-pressure crash")
+        self.assertEqual(crash_inc["strongest_hypothesis"], "Memory/swap exhaustion with swap-I/O thrashing")
 
     def test_wayland_crash_before_unclean_shutdown(self):
         checks = {

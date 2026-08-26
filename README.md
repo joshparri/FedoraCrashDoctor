@@ -7,6 +7,68 @@ It is designed to answer three questions after a crash:
 2. **What causes best fit the collected evidence?**
 3. **What controlled test would strengthen or weaken each explanation?**
 
+## History and diagnosis record
+
+The project includes a preserved crash/freeze chronology in
+[`HISTORY.md`](HISTORY.md). It records the AVANCE-WS7 diagnosis history, recovery
+procedures, controlled A/B tests, and the evidence behind the current model:
+Intel i915/KWin/Wayland multi-monitor freezes, severe RAM/zram pressure, and
+separate USB storage instability can all look like “Fedora froze” while having
+different causes.
+
+## Release hardening TODO
+
+The release-readiness worklist lives in [`TODO.md`](TODO.md). It tracks the
+remaining hardening pass for full-scan responsiveness, CLI support, test
+discovery, privileged broker tests, package validation, report schemas, improved
+freeze correlation, UI clarity, and CI-friendly validation.
+
+## Host stability audit
+
+Crash Doctor now includes a read-only host stability audit for AVANCE-WS7-style
+prevention work:
+
+```bash
+python3 host_stability_audit.py --output host-stability-audit.md
+python3 host_stability_audit.py --json --output host-stability-audit.json
+```
+
+The audit separates confirmed problems, high-confidence reversible fixes,
+controlled A/B experiments, monitoring-only signals, and explanations not
+supported by current evidence. It does not install packages, change kernel
+parameters, restart services, kill processes, or run destructive tests.
+
+## CLI examples
+
+Running `fedora_crash_doctor.py` with no arguments launches the GUI. Terminal
+mode is explicit:
+
+```bash
+python3 fedora_crash_doctor.py --help
+python3 fedora_crash_doctor.py --version
+python3 fedora_crash_doctor.py --cli --scan --mode quick --output scan.json
+python3 fedora_crash_doctor.py --cli --scan --mode full --output scan-full.json
+python3 fedora_crash_doctor.py --cli --scan --mode deep --output scan-deep.json
+```
+
+`quick` is for ordinary interactive diagnosis. `full` adds richer hardware,
+journal, package and network checks while staying suitable for foreground use.
+`deep` is explicit maintenance mode and includes expensive verification such as
+RPM file verification.
+
+## Release validation
+
+Run the normal test suite or the broader best-effort release validation:
+
+```bash
+./run_tests.sh
+./validate_release.sh
+```
+
+`validate_release.sh` runs required local checks and skips optional developer
+tools such as `shellcheck`, `desktop-file-validate`, and `systemd-analyze` when
+they are not installed.
+
 ## What changed in v3
 
 - **One authentication prompt per app session.** The GUI launches one root-owned,

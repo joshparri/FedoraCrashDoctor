@@ -23,7 +23,17 @@ install -m 0755 "$SOURCE_DIR/collector.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/canary.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/desktop_heartbeat.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/autoscan.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/host_stability_audit.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/device_inventory.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/freeze_classifiers.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/report_schema.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/safe_mitigation.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/telemetry_timeline.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/version.py" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/VERSION" "$SHARE_DIR/"
 install -m 0644 "$SOURCE_DIR/README.md" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/HISTORY.md" "$SHARE_DIR/" 2>/dev/null || true
+install -m 0644 "$SOURCE_DIR/TODO.md" "$SHARE_DIR/" 2>/dev/null || true
 install -m 0755 "$SOURCE_DIR/privileged_helper.py" "$LIBEXEC_DIR/fedora-crash-doctor-helper"
 install -m 0644 "$SOURCE_DIR/polkit/org.fedoracrashdoctor.policy" /usr/share/polkit-1/actions/
 install -m 0644 "$SOURCE_DIR/systemd/fedora-crash-doctor-canary.service" /usr/lib/systemd/system/
@@ -36,19 +46,7 @@ exec /usr/bin/python3 "$SHARE_DIR/fedora_crash_doctor.py" "\$@"
 EOF
 chmod 0755 /usr/local/bin/fedora-crash-doctor
 
-cat >/usr/share/applications/fedora-crash-doctor.desktop <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Fedora Crash Doctor
-GenericName=Crash Diagnostics
-Comment=Evidence-weighted hardware and software crash diagnostics
-Exec=fedora-crash-doctor
-Icon=utilities-system-monitor
-Terminal=false
-Categories=System;
-Keywords=crash;diagnostics;hardware;logs;fedora;kdump;smart;
-StartupNotify=true
-EOF
+install -m 0644 "$SOURCE_DIR/packaging/fedora-crash-doctor.desktop" /usr/share/applications/
 
 systemctl daemon-reload
 systemctl --global enable fedora-crash-doctor-desktop-heartbeat.service >/dev/null 2>&1 || true
