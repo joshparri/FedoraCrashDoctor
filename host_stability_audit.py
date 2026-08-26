@@ -132,14 +132,33 @@ def audit() -> dict[str, Any]:
             "Run sudo dnf upgrade --refresh from stable repositories, then reboot into the newest kernel.",
         ))
 
+    oomctl = run(["oomctl"], 10)
+    has_swap_monitoring = False
+    has_app_memory_pressure = False
+
+    if oomctl["status"] == "ok":
+        output = oomctl["output"]
+        swap_section = output.split("Swap Monitored CGroups:")[1].split("Memory Pressure Monitored CGroups:")[0] if "Swap Monitored CGroups:" in output else ""
+        has_swap_monitoring = "Path:" in swap_section
+        has_app_memory_pressure = "app.slice" in output.split("Memory Pressure Monitored CGroups:")[1] if "Memory Pressure Monitored CGroups:" in output else False
+
     if oomd["active"] == "active" and oomd["enabled"] == "enabled":
-        issues.append(issue(
-            "memory",
-            "systemd-oomd is active",
-            "confirmed protection",
-            [f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}", "Fedora uses PSI/cgroup-aware oomd policy by default."],
-            "Keep systemd-oomd enabled. Do not install a competing OOM daemon unless later evidence proves oomd cannot act soon enough.",
-        ))
+        if has_swap_monitoring and has_app_memory_pressure:
+            issues.append(issue(
+                "memory",
+                "systemd-oomd is active and monitoring workloads",
+                "confirmed protection",
+                [f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}", "oomctl confirms swap and memory pressure monitoring for user slices."],
+                "Keep systemd-oomd enabled. The desktop is protected against runaway applications.",
+            ))
+        else:
+            issues.append(issue(
+                "memory",
+                "systemd-oomd is active but workload protection is incomplete",
+                "partial protection",
+                [f"systemd-oomd active={oomd['active']} enabled={oomd['enabled']}", f"Swap monitoring active: {has_swap_monitoring}", f"app.slice memory pressure monitoring: {has_app_memory_pressure}"],
+                "Configure systemd-oomd (via systemctl --user set-property) to monitor swap and memory pressure on app.slice and background.slice.",
+            ))
     else:
         issues.append(issue(
             "memory",

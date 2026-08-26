@@ -1057,3 +1057,8 @@ Overall release confidence:
 Do **not** say “100% fixed” unless the evidence genuinely permits that.
 
 Most importantly: **keep working through the highest-value improvements rather than stopping after the first successful test.**
+
+# Priority 8 — systemd-oomd Configuration
+
+Configured systemd-oomd to protect the KDE session (session.slice) while monitoring and potentially sacrificing runaway processes in app.slice and background.slice based on swap exhaustion and memory pressure limits (50%).
+Status: Completed.

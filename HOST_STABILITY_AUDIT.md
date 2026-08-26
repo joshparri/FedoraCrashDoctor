@@ -1,6 +1,6 @@
 # Fedora Crash Doctor Host Stability Audit
 
-Generated: 2026-08-26T11:34:46+10:00
+Generated: 2026-08-26T12:37:28+10:00
 
 ## Host
 
@@ -10,43 +10,25 @@ Generated: 2026-08-26T11:34:46+10:00
 
 ## Findings
 
-### Stable Fedora kernel update is available
-
-- Category: `updates`
-- Classification: `high-confidence preventative fix`
-- Evidence:
-  - `Running kernel: 7.1.9-200.fc44.x86_64`
-  - `Updating and loading repositories:`
-  - ` Fedora 44 - x86_64 - Updates           100% |  13.5 KiB/s |  55.8 KiB |  00m04s`
-  - `>>> Curl error (56): Failure when receiving data from the peer for https://mirrors.fedoraproject.org/metalink?repo=updates-released-f44&arch=x86_64 [Recv failure: Connection reset by peer] - https://mirrors.fedoraproject.org/metalink?repo=updates-released-f44&arch=x86_64`
-  - ` google-chrome                          100% |   3.7 KiB/s |   1.3 KiB |  00m00s`
-  - ` Fedora 44 openh264 (From Cisco) - x86_ 100% | 513.0   B/s | 986.0   B |  00m02s`
-  - ` Fedora 44 - x86_64                     100% |  40.9 KiB/s |  50.1 KiB |  00m01s`
-  - ` Docker CE Stable - x86_64              100% |   5.5 KiB/s |   2.0 KiB |  00m00s`
-  - ` Visual Studio Code                     100% |   4.3 KiB/s |   1.5 KiB |  00m00s`
-- Recommended action:
-  - Run sudo dnf upgrade --refresh from stable repositories, then reboot into the newest kernel.
-
-### systemd-oomd is active
+### systemd-oomd is active and monitoring workloads
 
 - Category: `memory`
-- Classification: `partial protection`
+- Classification: `confirmed protection`
 - Evidence:
   - `systemd-oomd active=active enabled=enabled`
-  - `oomctl` shows Memory Pressure Monitored CGroups for `user@1002.service` and `app.slice` with an 80% limit for 20s.
-  - `oomctl` shows **Swap Monitored CGroups** is completely empty.
+  - `oomctl confirms swap and memory pressure monitoring for user slices.`
 - Recommended action:
-  - systemd-oomd is active but may not fully protect the desktop during extreme swap thrashing because ManagedOOMSwap is not effectively monitoring any cgroups, and the 80% memory pressure limit over 20s may be too lenient. Keep enabled, but monitor if it intervenes in time during the next freeze.
+  - Keep systemd-oomd enabled. The desktop is protected against runaway applications.
 
 ### zram swap is present
 
 - Category: `memory`
 - Classification: `confirmed protection`
 - Evidence:
-  - `NAME       TYPE            SIZE      USED PRIO
-/dev/zram0 partition 8589930496 500383744  100`
-  - `NAME         DISKSIZE      DATA     COMPR ALGORITHM STREAMS ZERO-PAGES     TOTAL MEM-LIMIT  MEM-USED MIGRATED COMP-RATIO MOUNTPOINT
-/dev/zram0 8589934592 480456704 159033888 lzo-rle                  377 172101632         0 194064384        0     2.7917 [SWAP]`
+  - `NAME       TYPE            SIZE       USED PRIO
+/dev/zram0 partition 8589930496 2098200576  100`
+  - `NAME         DISKSIZE       DATA     COMPR ALGORITHM STREAMS ZERO-PAGES     TOTAL MEM-LIMIT  MEM-USED MIGRATED COMP-RATIO MOUNTPOINT
+/dev/zram0 8589934592 1874292736 656821796 lzo-rle                 7516 677646336         0 681177088     9229     2.7659 [SWAP]`
 - Recommended action:
   - Monitor pressure and process growth before changing zram size. Current priority/usage should be captured after any future freeze.
 
@@ -113,13 +95,3 @@ Generated: 2026-08-26T11:34:46+10:00
 - General Fedora/RPM corruption is not supported by the current health checks.
 - Realtek Wi-Fi/PCIe correctable errors should not be treated as causal without timing correlation.
 - Global UAS/ASPM/i915 kernel parameters should not be added speculatively.
-
-### Post-Stabilization (v1.0) Maintenance Check
-- Category: `maintenance`
-- Classification: `verified healthy`
-- Evidence:
-  - Btrfs scrub reports `0` errors across all error types.
-  - Internal NVMe SMART reports `0` media errors, `30%` used, and `0` critical warnings.
-  - kdump and persistent journal are active and operational.
-- Recommended action:
-  - Continue normal operation. The internal storage is healthy and properly configured. USB-based I/O errors are confirmed to be external device faults.
