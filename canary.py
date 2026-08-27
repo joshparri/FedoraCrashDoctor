@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from safe_mitigation import evaluate_sample
+from safe_mitigation import StabilityController
 
 LOG_DIR = Path("/var/log/fedora-crash-doctor")
 LOG_FILE = LOG_DIR / "canary.log"
@@ -248,7 +248,7 @@ def desktop_heartbeat() -> dict[str, Any]:
     }
 
 
-def sample() -> tuple[dict[str, Any], int]:
+def sample(controller: StabilityController, last_detailed_time: float) -> tuple[dict[str, Any], int, float]:
     load = read_text("/proc/loadavg").split()
     mem = memory()
     psi_cpu = read_psi("cpu")
@@ -274,24 +274,33 @@ def sample() -> tuple[dict[str, Any], int]:
         "uptime_s": round(float(read_text("/proc/uptime", "0").split()[0]), 1),
         "load1": float(load[0]) if load else 0,
         "load5": float(load[1]) if len(load) > 1 else 0,
-        "max_temp_c": max_temp_c(),
         "avg_cpu_mhz": average_cpu_mhz(),
         "memory": mem,
         "psi_cpu": psi_cpu,
         "psi_mem": psi_mem,
         "psi_io": psi_io,
-        "vmstat": vmstat(),
-        "diskstats": diskstats(),
         "zram": zram_stats(),
     }
+    
+    now = time.monotonic()
+    needs_detailed = False
+    if interval < NORMAL_INTERVAL and controller.state == "ok":
+        needs_detailed = True
+    elif now - last_detailed_time > (60 if interval == NORMAL_INTERVAL else 15):
+        needs_detailed = True
+        
+    if needs_detailed:
+        row["max_temp_c"] = max_temp_c()
+        row["vmstat"] = vmstat()
+        row["diskstats"] = diskstats()
+        row["processes"] = gather_processes()
+        last_detailed_time = now
 
     row.update(desktop_heartbeat())
 
-    # Process scanning can be slightly heavy, but critical for diagnosis.
-    row["processes"] = gather_processes()
-    row["early_warning"] = evaluate_sample(row)
+    row["early_warning"] = controller.process_sample(row)
 
-    return row, interval
+    return row, interval, last_detailed_time
 
 
 def main() -> int:
@@ -303,11 +312,13 @@ def main() -> int:
     logger.addHandler(handler)
 
     next_fsync = time.monotonic()
+    last_detailed = 0.0
 
+    controller = StabilityController()
     while True:
         started = time.monotonic()
         try:
-            data, interval = sample()
+            data, interval, last_detailed = sample(controller, last_detailed)
             logger.info(json.dumps(data, separators=(",", ":")))
             handler.flush()
 

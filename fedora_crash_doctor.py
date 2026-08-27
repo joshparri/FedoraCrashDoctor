@@ -353,6 +353,7 @@ class MainWindow(QMainWindow):
         self.build_tests_tab()
         self.build_fixes_tab()
         self.build_trends_tab()
+        self.build_stability_guard_tab()
         self.build_export_tab()
         self.setCentralWidget(root)
 
@@ -454,6 +455,115 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.capture_output)
         layout.addWidget(text); layout.addLayout(buttons); layout.addWidget(splitter, 1)
         self.tabs.addTab(page, "Crash capture")
+
+    def build_stability_guard_tab(self) -> None:
+        page = QWidget(); layout = QVBoxLayout(page)
+        
+        refresh_btn = QPushButton("Refresh Status")
+        refresh_btn.clicked.connect(self.refresh_stability_guard)
+        layout.addWidget(refresh_btn)
+        
+        self.stability_guard_detail = QTextBrowser()
+        layout.addWidget(self.stability_guard_detail)
+        self.tabs.addTab(page, "Stability Guard")
+        self.refresh_stability_guard()
+
+    def refresh_stability_guard(self) -> None:
+        if not hasattr(self, "stability_guard_detail"):
+            return
+            
+        def is_active(unit, user=False):
+            cmd = ["systemctl", "is-active", unit]
+            if user:
+                cmd.insert(1, "--user")
+            try:
+                import subprocess
+                return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2).stdout.decode().strip() == "active"
+            except Exception:
+                return False
+
+        canary_active = is_active("fedora-crash-doctor-canary.service")
+        oomd_active = is_active("systemd-oomd.service")
+        heartbeat_active = is_active("fedora-crash-doctor-desktop-heartbeat.service", user=True)
+        notifier_active = is_active("fedora-crash-doctor-stability.path", user=True)
+
+        log_path = Path("/var/log/fedora-crash-doctor/canary.log")
+        
+        current_mem_psi = "Unknown"
+        current_io_psi = "Unknown"
+        
+        warnings = 0
+        criticals = 0
+        latest_event = "None"
+        latest_recovery = "None"
+        last_warning = None
+
+        if log_path.exists():
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - 1000000))
+                    lines = f.readlines()
+                
+                for line in lines:
+                    try:
+                        import json
+                        data = json.loads(line)
+                        if "psi_mem" in data:
+                            current_mem_psi = f"{data['psi_mem'].get('some_avg10', 0):.1f}%"
+                        if "psi_io" in data:
+                            current_io_psi = f"{data['psi_io'].get('full_avg10', 0):.1f}%"
+                            
+                        ew = data.get("early_warning")
+                        if ew:
+                            state = ew.get("state")
+                            if state == "warning":
+                                warnings += 1
+                                latest_event = ew.get("timestamp", latest_event)
+                                last_warning = ew
+                            elif state == "critical":
+                                criticals += 1
+                                latest_event = ew.get("timestamp", latest_event)
+                                last_warning = ew
+                            elif state in ("recovering", "ok"):
+                                if ew.get("title") == "System recovered":
+                                    latest_recovery = ew.get("timestamp", latest_recovery)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        html_out = [
+            "<h2>Current protection</h2>",
+            f"<ul>",
+            f"<li><b>Stability Guard:</b> {'Active' if notifier_active else 'Inactive'}</li>",
+            f"<li><b>Canary:</b> {'Active' if canary_active else 'Inactive'}</li>",
+            f"<li><b>Desktop heartbeat:</b> {'Active' if heartbeat_active else 'Inactive'}</li>",
+            f"<li><b>systemd-oomd:</b> {'Active' if oomd_active else 'Inactive'}</li>",
+            f"<li><b>Current memory pressure:</b> {current_mem_psi}</li>",
+            f"<li><b>Current I/O pressure:</b> {current_io_psi}</li>",
+            "</ul>",
+        ]
+        
+        if last_warning:
+            html_out.append("<h2>Recent warning</h2>")
+            html_out.append(f"<p><b>Last warning:</b> {last_warning.get('timestamp')}</p>")
+            html_out.append(f"<p><b>Severity:</b> {str(last_warning.get('state', '')).capitalize()}</p>")
+            html_out.append(f"<p><b>Reason:</b> {last_warning.get('title')}</p>")
+            html_out.append(f"<p><b>Largest workload:</b> {', '.join(last_warning.get('likely_offenders', []))}</p>")
+            recovered = "Yes" if latest_recovery != "None" and latest_recovery > latest_event else "No"
+            html_out.append(f"<p><b>Recovered:</b> {recovered}</p>")
+
+        html_out.append("<h2>History</h2>")
+        html_out.append("<ul>")
+        html_out.append(f"<li><b>Number of warnings:</b> {warnings}</li>")
+        html_out.append(f"<li><b>Number of critical events:</b> {criticals}</li>")
+        html_out.append(f"<li><b>Latest event:</b> {latest_event}</li>")
+        html_out.append(f"<li><b>Latest recovery:</b> {latest_recovery}</li>")
+        html_out.append("</ul>")
+
+        self.stability_guard_detail.setHtml("".join(html_out))
 
     def build_tests_tab(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page)

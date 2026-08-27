@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch for Fedora Crash Doctor stability warnings
+
+[Path]
+PathModified=/run/fedora-crash-doctor/stability-event.json
+
+[Install]
+WantedBy=default.target

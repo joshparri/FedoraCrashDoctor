@@ -35,10 +35,13 @@ install -m 0644 "$SOURCE_DIR/README.md" "$SHARE_DIR/"
 install -m 0644 "$SOURCE_DIR/HISTORY.md" "$SHARE_DIR/" 2>/dev/null || true
 install -m 0644 "$SOURCE_DIR/TODO.md" "$SHARE_DIR/" 2>/dev/null || true
 install -m 0755 "$SOURCE_DIR/privileged_helper.py" "$LIBEXEC_DIR/fedora-crash-doctor-helper"
+install -m 0755 "$SOURCE_DIR/stability_notifier.py" "$LIBEXEC_DIR/fedora-crash-doctor-stability-notifier"
 install -m 0644 "$SOURCE_DIR/polkit/org.fedoracrashdoctor.policy" /usr/share/polkit-1/actions/
 install -m 0644 "$SOURCE_DIR/systemd/fedora-crash-doctor-canary.service" /usr/lib/systemd/system/
 install -m 0644 "$SOURCE_DIR/systemd/fedora-crash-doctor-autoscan.service" /usr/lib/systemd/system/
 install -m 0644 "$SOURCE_DIR/systemd/fedora-crash-doctor-desktop-heartbeat.service" /usr/lib/systemd/user/
+install -m 0644 "$SOURCE_DIR/systemd/fedora-crash-doctor-stability.service" /usr/lib/systemd/user/
+install -m 0644 "$SOURCE_DIR/systemd/fedora-crash-doctor-stability.path" /usr/lib/systemd/user/
 
 cat >/usr/local/bin/fedora-crash-doctor <<EOF
 #!/usr/bin/env bash
@@ -50,6 +53,7 @@ install -m 0644 "$SOURCE_DIR/packaging/fedora-crash-doctor.desktop" /usr/share/a
 
 systemctl daemon-reload
 systemctl --global enable fedora-crash-doctor-desktop-heartbeat.service >/dev/null 2>&1 || true
+systemctl --global enable fedora-crash-doctor-stability.path >/dev/null 2>&1 || true
 update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 restorecon -RF "$SHARE_DIR" "$LIBEXEC_DIR" /usr/share/polkit-1/actions/org.fedoracrashdoctor.policy /usr/share/applications/fedora-crash-doctor.desktop 2>/dev/null || true
 

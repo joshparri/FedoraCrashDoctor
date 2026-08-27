@@ -1,0 +1,6 @@
+[Unit]
+Description=Fedora Crash Doctor Stability Notifier
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/bin/python3 -u /usr/libexec/fedora-crash-doctor/fedora-crash-doctor-stability-notifier

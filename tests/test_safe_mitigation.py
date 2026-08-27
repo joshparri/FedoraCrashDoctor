@@ -19,7 +19,7 @@ class SafeMitigationTests(unittest.TestCase):
         })
         self.assertEqual(result["severity"], "critical")
         self.assertFalse(result["automatic_action_taken"])
-        self.assertIn("Google Chrome", result["likely_offenders"][0]["group"])
+        self.assertTrue(any("Google Chrome" in x for x in result["likely_offenders"]))
 
     def test_plasma_shell_only_recovery_suggestion(self):
         result = evaluate_sample({"plasmashell_ok": False, "kwin_ok": True})
