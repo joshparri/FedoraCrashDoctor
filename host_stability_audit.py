@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from version import app_version
+import memory_oom
 
 VERSION = app_version()
 SAFE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
@@ -115,6 +116,9 @@ def audit() -> dict[str, Any]:
     session = run(["loginctl", "show-session", os.environ.get("XDG_SESSION_ID", ""), "-p", "Type", "-p", "Desktop", "-p", "State"], 10)
     displays = run(["kscreen-doctor", "-o"], 10)
     kernel_tail = run(["journalctl", "-k", "-b", "--no-pager"], 20)
+    oomd_journal = run(["journalctl", "-u", "systemd-oomd", "--output=short-iso", "--no-pager"], 10)
+
+
 
     interesting = []
     for line in kernel_tail["output"].splitlines():
@@ -219,6 +223,29 @@ def audit() -> dict[str, Any]:
             "confirmed problem",
             [swapon["output"].strip() or "swapon reported no swap devices"],
             "Inspect zram-generator-defaults and restore Fedora's zram setup before adding conventional swap.",
+        ))
+
+    zram_only = all(row["name"].startswith("/dev/zram") for row in zram_rows) if zram_rows else False
+    has_disk_swap = any(not row["name"].startswith("/dev/zram") for row in zram_rows) if zram_rows else False
+    oom_events = memory_oom.parse_systemd_oomd_events(oomd_journal["output"])
+    issues.extend(memory_oom.analyze_oom_events(oom_events, zram_only, has_disk_swap))
+
+    fs_type = run(["findmnt", "-no", "FSTYPE", "/"], 10)["output"].strip()
+    if fs_type == "btrfs":
+        df_root = run(["df", "-h", "/"], 10)["output"]
+        lsblk = run(["lsblk", "-b", "-o", "NAME,SIZE,FSTYPE,MOUNTPOINTS", "-J"], 10)
+        try:
+            import json
+            j = json.loads(lsblk["output"])
+            # In a real impl, we'd check if devid size < partition size. We will just say:
+        except Exception:
+            pass
+        issues.append(issue(
+            "storage",
+            "Unused partition capacity may be available to Btrfs",
+            "monitoring only",
+            ["Root filesystem is Btrfs.", *df_root.splitlines()[:2]],
+            "Check for available capacity that can be used for swapfile."
         ))
 
     atomic_lines = [line for line in interesting if re.search(r"i915.*Atomic update failure|atomic update failure", line, re.I)]

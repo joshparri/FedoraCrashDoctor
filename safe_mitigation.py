@@ -39,7 +39,7 @@ def evaluate_sample(sample: dict[str, Any]) -> dict[str, Any]:
     if mem_avail_pct < 0.08 and swap_used_pct > 0.85 and mem_some >= 20 and io_full >= 20:
         severity = "critical"
         category = "memory"
-        title = "Severe memory pressure"
+        title = f"Memory pressure is critical \u2014 swap is {int(swap_used_pct * 100)}% full."
         reasons = [
             f"Available RAM: {int(mem_available)} MB",
             f"zram/swap: {int(swap_used_pct * 100)}%",
@@ -74,7 +74,7 @@ def evaluate_sample(sample: dict[str, Any]) -> dict[str, Any]:
         # Fallback to critical if missing PSI data but RAM is completely exhausted
         severity = "critical"
         category = "memory"
-        title = "Severe memory exhaustion"
+        title = f"Memory pressure is critical \u2014 swap is {int(swap_used_pct * 100)}% full."
         reasons = [
             f"Available RAM: {int(mem_available)} MB",
             f"zram/swap: {int(swap_used_pct * 100)}%"
@@ -102,7 +102,7 @@ def evaluate_sample(sample: dict[str, Any]) -> dict[str, Any]:
         actions.append("The desktop is still responsive.")
         actions.append("Closing an unneeded heavy application now may prevent a freeze.")
     elif severity == "critical" and category == "memory":
-        actions.append("Save important work and reduce memory usage now.")
+        actions.append("Save important work or close heavy background applications.")
     
     plasma_recovery = None
     if plasma_ok is False and kwin_ok is True:

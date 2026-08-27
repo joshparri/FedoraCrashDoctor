@@ -277,6 +277,99 @@ def btrfs_scrub_start() -> dict[str, Any]:
     return {"ok": result["ok"], "output": result["output"], "note": "The scrub continues in the background. Run a new scan or btrfs scrub status to review progress."}
 
 
+def expand_btrfs_to_device() -> dict[str, Any]:
+    fs = command(["findmnt", "-n", "-o", "FSTYPE", "/"], 20)["output"].strip()
+    if fs != "btrfs":
+        return {"ok": False, "output": f"Root filesystem is {fs or 'unknown'}, not Btrfs."}
+    show = command(["btrfs", "filesystem", "show", "--raw", "/"], 30)["output"]
+    import re
+    match = re.search(r"devid\s+(\d+)\s+size\s+(\d+)\s+.*path\s+(\S+)", show)
+    if not match:
+        return {"ok": False, "output": "Could not determine Btrfs device ID."}
+    devid = match.group(1)
+    fs_size = int(match.group(2))
+    path = match.group(3)
+    lsblk = command(["lsblk", "-b", "-n", "-o", "SIZE", path], 10)["output"].strip()
+    if lsblk.isdigit():
+        part_size = int(lsblk)
+        if part_size - fs_size < 1024**3:
+            return {"ok": False, "output": "Partition does not have meaningful unused capacity."}
+    
+    result = command(["btrfs", "filesystem", "resize", f"{devid}:max", "/"], 120)
+    return {"ok": result["ok"], "output": result["output"]}
+
+
+def configure_swap_fallback(size_gb: int) -> dict[str, Any]:
+    if size_gb not in (8, 16):
+        return {"ok": False, "output": "Only 8 or 16 GiB sizes are supported."}
+    fs = command(["findmnt", "-n", "-o", "FSTYPE", "/"], 20)["output"].strip()
+    if fs != "btrfs":
+        return {"ok": False, "output": f"Root filesystem is {fs or 'unknown'}, not Btrfs."}
+    if not shutil.which("btrfs"):
+        return {"ok": False, "output": "btrfs command not found."}
+        
+    df = command(["df", "-B1", "--output=avail", "/"], 20)["output"].splitlines()
+    if len(df) >= 2 and df[1].strip().isdigit():
+        avail_bytes = int(df[1].strip())
+        if avail_bytes < (size_gb + 10) * 1024**3:
+            return {"ok": False, "output": f"Insufficient free space. {size_gb} GiB swap + 10 GiB reserve required."}
+
+        
+    if Path("/swap/swapfile").exists():
+        return {"ok": False, "output": "/swap/swapfile already exists."}
+        
+    fstab_path = Path("/etc/fstab")
+    fstab = fstab_path.read_text(errors="replace")
+    if "/swap/swapfile" in fstab:
+        return {"ok": False, "output": "/swap/swapfile is already in /etc/fstab."}
+        
+    outputs = []
+    created_subvol = False
+    if not Path("/swap").exists():
+        res = command(["btrfs", "subvolume", "create", "/swap"], 30)
+        outputs.append(res["output"])
+        if not res["ok"]:
+            return {"ok": False, "output": "\n".join(outputs)}
+        created_subvol = True
+            
+    res = command(["btrfs", "filesystem", "mkswapfile", "--size", f"{size_gb}g", "/swap/swapfile"], 300)
+    outputs.append(res["output"])
+    if not res["ok"]:
+        if Path("/swap/swapfile").exists():
+            command(["rm", "-f", "/swap/swapfile"], 30)
+        if created_subvol:
+            command(["btrfs", "subvolume", "delete", "/swap"], 30)
+        return {"ok": False, "output": "\n".join(outputs)}
+        
+    shutil.copy2("/etc/fstab", "/etc/fstab.bak")
+    with open("/etc/fstab", "a") as f:
+        f.write("\n# Added by Fedora Crash Doctor\n/swap/swapfile none swap defaults,pri=10 0 0\n")
+        
+    command(["systemctl", "daemon-reload"], 30)
+    
+    map_res = command(["btrfs", "inspect-internal", "map-swapfile", "/swap/swapfile"], 30)
+    if not map_res["ok"]:
+        outputs.append(f"map-swapfile validation failed: {map_res['output']}")
+        # Continue anyway, swapon might still succeed, or it will fail and rollback safely.
+    
+    res = command(["swapon", "/swap/swapfile"], 60)
+    outputs.append(res["output"])
+    if not res["ok"]:
+        off_res = command(["swapoff", "/swap/swapfile"], 120)
+        if not off_res["ok"]:
+            outputs.append(f"Failed to swapoff: {off_res['output']}. Partial rollback. Fstab configuration and swapfile preserved.")
+        else:
+            fstab_path.write_text(fstab)
+            command(["rm", "-f", "/swap/swapfile"], 30)
+            if created_subvol:
+                command(["btrfs", "subvolume", "delete", "/swap"], 30)
+            command(["systemctl", "daemon-reload"], 30)
+            outputs.append("Rollback completed successfully.")
+        return {"ok": False, "output": "\n".join(outputs)}
+        
+    return {"ok": True, "output": "\n".join(outputs)}
+
+
 def stress_test(kind: str, request_id: str) -> dict[str, Any]:
     if kind == "cpu":
         argv = ["stress-ng", "--cpu", "0", "--timeout", "5m", "--metrics-brief"]
@@ -365,6 +458,11 @@ def dispatch(req: dict[str, Any], uid: int, gid: int, home: str, request_id: str
         return smart_short(device)
     if action == "btrfs_scrub":
         return btrfs_scrub_start()
+    if action == "expand_btrfs_to_device":
+        return expand_btrfs_to_device()
+    if action == "configure_swap_fallback":
+        size = int(params.get("size", 16))
+        return configure_swap_fallback(size)
     if action == "stress_cpu":
         return stress_test("cpu", request_id)
     if action == "stress_memory":

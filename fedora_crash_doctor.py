@@ -354,6 +354,7 @@ class MainWindow(QMainWindow):
         self.build_fixes_tab()
         self.build_trends_tab()
         self.build_stability_guard_tab()
+        self.build_memory_oom_tab()
         self.build_export_tab()
         self.setCentralWidget(root)
 
@@ -564,6 +565,106 @@ class MainWindow(QMainWindow):
         html_out.append("</ul>")
 
         self.stability_guard_detail.setHtml("".join(html_out))
+
+    def build_memory_oom_tab(self) -> None:
+        page = QWidget(); layout = QVBoxLayout(page)
+        
+        refresh_btn = QPushButton("Refresh Status")
+        refresh_btn.clicked.connect(self.refresh_memory_oom)
+        layout.addWidget(refresh_btn)
+        
+        self.memory_oom_detail = QTextBrowser()
+        layout.addWidget(self.memory_oom_detail, 1)
+        
+        buttons = QHBoxLayout()
+        ev_btn = QPushButton("View OOM evidence")
+        swap_btn = QPushButton("Add emergency swap (16 GiB)")
+        expand_btrfs_btn = QPushButton("Expand Btrfs filesystem")
+        
+        ev_btn.clicked.connect(lambda: self.launch(["journalctl", "-u", "systemd-oomd", "--no-pager"]))
+        swap_btn.clicked.connect(lambda: self.run_test("configure_swap_fallback", {"size": 16}, "This will create a 16GiB disk-backed swapfile in /swap/swapfile and enable it with priority 10. Continue?", True))
+        expand_btrfs_btn.clicked.connect(lambda: self.run_test("expand_btrfs_to_device", {}, "This will run btrfs filesystem resize max / to use all available partition space. Continue?", True))
+        
+        buttons.addWidget(ev_btn)
+        buttons.addWidget(swap_btn)
+        buttons.addWidget(expand_btrfs_btn)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        
+        self.tabs.addTab(page, "Memory / OOM")
+        self.refresh_memory_oom()
+
+    def refresh_memory_oom(self) -> None:
+        if not hasattr(self, "memory_oom_detail"):
+            return
+            
+        import subprocess
+        
+        def sh(cmd):
+            try:
+                return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, text=True).stdout.strip()
+            except Exception:
+                return ""
+                
+        free_out = sh(["free", "-h"])
+        swapon_out = sh(["swapon", "--show"])
+        zram_out = sh(["zramctl"])
+        psi_mem = sh(["cat", "/proc/pressure/memory"])
+        oomctl_out = sh(["oomctl"])
+        
+        has_disk_swap = "/swap/swapfile" in swapon_out or any(p in swapon_out for p in ["/dev/sd", "/dev/nvme", "/dev/mapper"])
+        
+        show_out = sh(["btrfs", "filesystem", "show", "--raw", "/"])
+        expand_needed = False
+        import re
+        match = re.search(r"devid\s+\d+\s+size\s+(\d+)\s+.*path\s+(\S+)", show_out)
+        if match:
+            fs_size = int(match.group(1))
+            path = match.group(2)
+            lsblk_out = sh(["lsblk", "-b", "-n", "-o", "SIZE", path])
+            if lsblk_out.isdigit() and int(lsblk_out) - fs_size > 1024**3:
+                expand_needed = True
+                
+        # Access the buttons
+        layout = self.memory_oom_detail.parent().layout()
+        buttons = layout.itemAt(2).layout()
+        swap_btn = buttons.itemAt(1).widget()
+        expand_btrfs_btn = buttons.itemAt(2).widget()
+        
+        swap_btn.setVisible(not has_disk_swap)
+        expand_btrfs_btn.setVisible(expand_needed)
+        
+        # OOM kills
+        journal_out = sh(["journalctl", "-b", "-u", "systemd-oomd", "--output=short-iso", "--no-pager"])
+
+        
+        import html
+        
+        html_out = [
+            "<h2>Memory Pressure</h2>",
+            "<pre><b>RAM (free -h):</b>\\n" + html.escape(free_out) + "</pre>",
+            "<pre><b>ZRAM (zramctl):</b>\\n" + html.escape(zram_out) + "</pre>",
+            "<pre><b>Disk Swap (swapon):</b>\\n" + html.escape(swapon_out) + "</pre>",
+            "<pre><b>Memory Pressure (PSI):</b>\\n" + html.escape(psi_mem) + "</pre>",
+            "<pre><b>OOMD State:</b>\\n" + html.escape(oomctl_out) + "</pre>",
+        ]
+        
+        import memory_oom
+        events = memory_oom.parse_systemd_oomd_events(journal_out)
+        
+        html_out.append(f"<h2>OOM Kills (This Boot: {len(events)})</h2>")
+        if events:
+            ev = events[-1]
+            html_out.append(f"<p><b>Most recent victim:</b> {html.escape(ev['app_name'])} ({html.escape(ev['cgroup'])})</p>")
+            html_out.append(f"<p><b>Most recent kill reason:</b> Swap used reached {ev['system_swap_percent']:.1f}% (Limit: {ev['limit']}%).</p>")
+            html_out.append("<ul>")
+            for e in events[-5:]:
+                html_out.append(f"<li>{html.escape(e['timestamp_str'])}: Killed {html.escape(e['app_name'])}</li>")
+            html_out.append("</ul>")
+        else:
+            html_out.append("<p>No systemd-oomd kills this boot.</p>")
+            
+        self.memory_oom_detail.setHtml("".join(html_out))
 
     def build_tests_tab(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page)
