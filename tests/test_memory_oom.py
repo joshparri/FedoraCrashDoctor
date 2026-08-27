@@ -25,8 +25,13 @@ class TestMemoryOOM(unittest.TestCase):
         self.assertEqual(events[1]["victim_swap_usage"], "2.8G")
         
         # Test analysis with simulated current time right after the events
-        now = datetime.fromisoformat("2026-08-27T16:20:00+1000").astimezone(timezone.utc)
-        issues = analyze_oom_events(events, zram_only=True, has_disk_swap=False)
+        from unittest.mock import patch
+        
+        with patch("memory_oom.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime.fromisoformat("2026-08-27T16:20:00+1000").astimezone(timezone.utc)
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.strptime = datetime.strptime
+            issues = analyze_oom_events(events, zram_only=True, has_disk_swap=False)
         
         self.assertTrue(any("CONFIRMED: Repeated systemd-oomd kills caused by swap exhaustion" in i["title"] for i in issues))
         

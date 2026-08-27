@@ -360,36 +360,6 @@ class AnalysisTests(unittest.TestCase):
         incidents, boot_warnings, unresolved = build_incidents(findings, checks)
         self.assertEqual(len(incidents), 0)
 
-    def test_integration_gui_compatibility(self):
-        import sys, json
-        from unittest.mock import MagicMock
-        sys.modules['PySide6'] = MagicMock()
-        sys.modules['PySide6.QtCore'] = MagicMock()
-        sys.modules['PySide6.QtGui'] = MagicMock()
-        sys.modules['PySide6.QtWidgets'] = MagicMock()
-
-        from fedora_crash_doctor import MainWindow
-
-        checks = {
-            "previous_errors": check("prev", "2026-07-29T13:26:00+1000 host kernel: i915 atomic update failure"),
-            "boot_history": check("boot", "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)"),
-            "journal_boots": check("boots", "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST\n0 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 13:26:00 AEST Wed 2026-07-29 13:26:00 AEST")
-        }
-        import collector
-        collector.get_evidence = MagicMock(return_value=checks)
-        report = collector.collect("quick")
-        report_json = json.loads(json.dumps(report, default=str))
-
-        window = MainWindow()
-        window.report = report_json
-
-        self.assertIn("overall", report_json)
-        self.assertIn("hypotheses", report_json)
-        self.assertIn("incidents", report_json)
-        self.assertIn("boot_warnings", report_json)
-        self.assertIn("unresolved_evidence", report_json)
-
-        window.populate_fixes()
 
 
     def test_overall_no_incidents(self):

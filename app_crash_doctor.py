@@ -1,0 +1,112 @@
+import re
+from datetime import datetime, timezone
+from typing import Any
+import hashlib
+
+def parse_coredumpctl_line(line: str) -> dict[str, Any] | None:
+    match = re.match(r"^\w{3}\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+\w+\s+(\d+)\s+\d+\s+\d+\s+(\w+)\s+(\w+)\s+(\S+)\s+(.+)$", line.strip())
+    if match:
+        date_str = match.group(1)
+        time_str = match.group(2)
+        pid = match.group(3)
+        sig = match.group(4)
+        status = match.group(5)
+        exe = match.group(6)
+        size = match.group(7).strip()
+        
+        try:
+            dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+            
+        return {
+            "time": dt,
+            "pid": pid,
+            "signal": sig,
+            "status": status,
+            "exe": exe,
+            "size": size,
+            "raw": line
+        }
+    return None
+
+def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
+    crashes = []
+    raw_count = 0
+    unique_crashes = {}
+    
+    for line in lines:
+        parsed = parse_coredumpctl_line(line)
+        if parsed:
+            raw_count += 1
+            # deduplicate by time, pid, exe, signal
+            eid = f"{parsed['time'].isoformat()}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
+            if eid not in unique_crashes:
+                unique_crashes[eid] = parsed
+                crashes.append(parsed)
+
+    by_app = {}
+    app_raw_counts = {}
+    for line in lines:
+        p = parse_coredumpctl_line(line)
+        if p:
+            app_name = p["exe"].split("/")[-1]
+            app_raw_counts[app_name] = app_raw_counts.get(app_name, 0) + 1
+
+    for c in crashes:
+        app_name = c["exe"].split("/")[-1]
+        if app_name not in by_app:
+            by_app[app_name] = []
+        by_app[app_name].append(c)
+        
+    issues = []
+    def create_issue(category, title, status, evidence, action):
+        return {
+            "category": category,
+            "title": title,
+            "status": status,
+            "evidence": evidence,
+            "recommended_action": action,
+        }
+
+    now = datetime.now()
+    
+    for app_name, evs in by_app.items():
+        evs.sort(key=lambda x: x["time"])
+        total_count = len(evs)
+        
+        if total_count < 3 and "antigravity" not in app_name.lower():
+            continue
+            
+        first_seen = evs[0]["time"]
+        last_seen = evs[-1]["time"]
+        
+        today_crashes = [c for c in evs if (now - c["time"]).total_seconds() < 86400]
+        
+        paths = list(set(c["exe"] for c in evs))
+        signals = list(set(c["signal"] for c in evs))
+        
+        last = evs[-1]
+        
+        evidence = [
+            f"Unique incidents: {total_count}",
+            f"Raw evidence appearances: {app_raw_counts.get(app_name, 0)}",
+            f"Recent/current boot crashes: {len(today_crashes)}",
+            f"First seen: {first_seen.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Last seen: {last_seen.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Most recent coredump: {last['status']} ({last['size']})",
+            f"Signals observed: {', '.join(signals)}",
+        ]
+        
+        if len(paths) > 1:
+            evidence.append(f"Executable path changed across history: {', '.join(paths)}")
+            
+        issues.append(create_issue(
+            "applications",
+            f"Application instability: {app_name.capitalize()} has a recurring crash history.",
+            "Warning",
+            evidence,
+            "Investigate application-specific logs, versions, or reinstall."
+        ))
+        
+    return issues
