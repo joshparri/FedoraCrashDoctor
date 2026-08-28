@@ -136,6 +136,32 @@ class PlasmaCaptureTests(unittest.TestCase):
     @patch('plasma_capture._run')
     @patch('plasma_capture.subprocess.run')
     @patch('plasma_capture.Path.home')
+    def test_empty_graphics_journal_is_valid_capture(self, mock_home, mock_sub_run, mock_run):
+        with tempfile.TemporaryDirectory() as tmp:
+            mock_home.return_value = Path(tmp)
+
+            # Healthy/quiet journal: no matching graphics events.
+            mock_run.return_value = ""
+            mock_sub_run.return_value = MagicMock(
+                stdout="('PANELS=2',)\\n",
+                returncode=0,
+                stderr=""
+            )
+
+            summary = plasma_capture.capture_frozen_plasma()
+            capture_path = Path(summary["capture_path"])
+            graphics_file = capture_path / "graphics-journal.txt"
+
+            self.assertTrue(graphics_file.exists())
+            self.assertEqual(graphics_file.read_text(), "")
+            self.assertNotIn("graphics-journal.txt", summary["failed_collectors"])
+            self.assertFalse(summary["i915_atomic_event_in_recent_window"])
+            self.assertFalse(summary["gpu_hang_in_recent_window"])
+            self.assertFalse(summary["gpu_reset_in_recent_window"])
+
+    @patch('plasma_capture._run')
+    @patch('plasma_capture.subprocess.run')
+    @patch('plasma_capture.Path.home')
     def test_i915_gpu_hang_atomic_events(self, mock_home, mock_sub_run, mock_run):
         with tempfile.TemporaryDirectory() as tmp:
             mock_home.return_value = Path(tmp)

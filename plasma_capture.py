@@ -61,8 +61,8 @@ def capture_frozen_plasma() -> dict[str, Any]:
         "failed_collectors": [],
     }
 
-    def save(name: str, content: str) -> None:
-        if content:
+    def save(name: str, content: str, empty_is_failure: bool = True) -> None:
+        if content or not empty_is_failure:
             with open(capture_dir / name, "w", encoding="utf-8") as f:
                 f.write(content)
         else:
@@ -255,7 +255,7 @@ def capture_frozen_plasma() -> dict[str, Any]:
     save("recent-journal.txt", recent_full)
 
     graphics_journal = "\n".join(line for line in recent_full.splitlines() if any(u in line for u in graphics_units) or "drm" in line.lower())
-    save("graphics-journal.txt", graphics_journal)
+    save("graphics-journal.txt", graphics_journal, empty_is_failure=False)
 
     summary["i915_atomic_event_in_recent_window"] = "Atomic update failure" in graphics_journal
     summary["gpu_hang_in_recent_window"] = "GPU HANG" in graphics_journal
