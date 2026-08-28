@@ -247,6 +247,20 @@ class CaptureDialog(QDialog):
         layout.addLayout(buttons)
 
 
+class CaptureWorker(QObject):
+    finished = Signal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        try:
+            import plasma_capture
+            res = plasma_capture.capture_frozen_plasma()
+            self.finished.emit(res)
+        except Exception as e:
+            self.finished.emit({"capture_complete": False, "error": str(e), "failed_collectors": ["all"]})
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -460,11 +474,11 @@ class MainWindow(QMainWindow):
 
     def build_stability_guard_tab(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page)
-        
+
         refresh_btn = QPushButton("Refresh Status")
         refresh_btn.clicked.connect(self.refresh_stability_guard)
         layout.addWidget(refresh_btn)
-        
+
         self.stability_guard_detail = QTextBrowser()
         layout.addWidget(self.stability_guard_detail)
         self.tabs.addTab(page, "Stability Guard")
@@ -473,7 +487,7 @@ class MainWindow(QMainWindow):
     def refresh_stability_guard(self) -> None:
         if not hasattr(self, "stability_guard_detail"):
             return
-            
+
         def is_active(unit, user=False):
             cmd = ["systemctl", "is-active", unit]
             if user:
@@ -490,10 +504,10 @@ class MainWindow(QMainWindow):
         notifier_active = is_active("fedora-crash-doctor-stability.path", user=True)
 
         log_path = Path("/var/log/fedora-crash-doctor/canary.log")
-        
+
         current_mem_psi = "Unknown"
         current_io_psi = "Unknown"
-        
+
         warnings = 0
         criticals = 0
         latest_event = "None"
@@ -507,7 +521,7 @@ class MainWindow(QMainWindow):
                     size = f.tell()
                     f.seek(max(0, size - 1000000))
                     lines = f.readlines()
-                
+
                 for line in lines:
                     try:
                         import json
@@ -516,7 +530,7 @@ class MainWindow(QMainWindow):
                             current_mem_psi = f"{data['psi_mem'].get('some_avg10', 0):.1f}%"
                         if "psi_io" in data:
                             current_io_psi = f"{data['psi_io'].get('full_avg10', 0):.1f}%"
-                            
+
                         ew = data.get("early_warning")
                         if ew:
                             state = ew.get("state")
@@ -547,7 +561,7 @@ class MainWindow(QMainWindow):
             f"<li><b>Current I/O pressure:</b> {current_io_psi}</li>",
             "</ul>",
         ]
-        
+
         if last_warning:
             html_out.append("<h2>Recent warning</h2>")
             html_out.append(f"<p><b>Last warning:</b> {last_warning.get('timestamp')}</p>")
@@ -569,52 +583,52 @@ class MainWindow(QMainWindow):
 
     def build_memory_oom_tab(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page)
-        
+
         refresh_btn = QPushButton("Refresh Status")
         refresh_btn.clicked.connect(self.refresh_memory_oom)
         layout.addWidget(refresh_btn)
-        
+
         self.memory_oom_detail = QTextBrowser()
         layout.addWidget(self.memory_oom_detail, 1)
-        
+
         buttons = QHBoxLayout()
         ev_btn = QPushButton("View OOM evidence")
         swap_btn = QPushButton("Add emergency swap (16 GiB)")
         expand_btrfs_btn = QPushButton("Expand Btrfs filesystem")
-        
+
         ev_btn.clicked.connect(lambda: self.launch(["journalctl", "-u", "systemd-oomd", "--no-pager"]))
         swap_btn.clicked.connect(lambda: self.run_test("configure_swap_fallback", {"size": 16}, "This will create a 16GiB disk-backed swapfile in /swap/swapfile and enable it with priority 10. Continue?", True))
         expand_btrfs_btn.clicked.connect(lambda: self.run_test("expand_btrfs_to_device", {}, "This will run btrfs filesystem resize max / to use all available partition space. Continue?", True))
-        
+
         buttons.addWidget(ev_btn)
         buttons.addWidget(swap_btn)
         buttons.addWidget(expand_btrfs_btn)
         buttons.addStretch()
         layout.addLayout(buttons)
-        
+
         self.tabs.addTab(page, "Memory / OOM")
         self.refresh_memory_oom()
 
     def refresh_memory_oom(self) -> None:
         if not hasattr(self, "memory_oom_detail"):
             return
-            
+
         import subprocess
-        
+
         def sh(cmd):
             try:
                 return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, text=True).stdout.strip()
             except Exception:
                 return ""
-                
+
         free_out = sh(["free", "-h"])
         swapon_out = sh(["swapon", "--show"])
         zram_out = sh(["zramctl"])
         psi_mem = sh(["cat", "/proc/pressure/memory"])
         oomctl_out = sh(["oomctl"])
-        
+
         has_disk_swap = "/swap/swapfile" in swapon_out or any(p in swapon_out for p in ["/dev/sd", "/dev/nvme", "/dev/mapper"])
-        
+
         show_out = sh(["btrfs", "filesystem", "show", "--raw", "/"])
         expand_needed = False
         import re
@@ -625,22 +639,22 @@ class MainWindow(QMainWindow):
             lsblk_out = sh(["lsblk", "-b", "-n", "-o", "SIZE", path])
             if lsblk_out.isdigit() and int(lsblk_out) - fs_size > 1024**3:
                 expand_needed = True
-                
+
         # Access the buttons
         layout = self.memory_oom_detail.parent().layout()
         buttons = layout.itemAt(2).layout()
         swap_btn = buttons.itemAt(1).widget()
         expand_btrfs_btn = buttons.itemAt(2).widget()
-        
+
         swap_btn.setVisible(not has_disk_swap)
         expand_btrfs_btn.setVisible(expand_needed)
-        
+
         # OOM kills
         journal_out = sh(["journalctl", "-b", "-u", "systemd-oomd", "--output=short-iso", "--no-pager"])
 
-        
+
         import html
-        
+
         html_out = [
             "<h2>Memory Pressure</h2>",
             "<pre><b>RAM (free -h):</b>\\n" + html.escape(free_out) + "</pre>",
@@ -649,10 +663,10 @@ class MainWindow(QMainWindow):
             "<pre><b>Memory Pressure (PSI):</b>\\n" + html.escape(psi_mem) + "</pre>",
             "<pre><b>OOMD State:</b>\\n" + html.escape(oomctl_out) + "</pre>",
         ]
-        
+
         import memory_oom
         events = memory_oom.parse_systemd_oomd_events(journal_out)
-        
+
         html_out.append(f"<h2>OOM Kills (This Boot: {len(events)})</h2>")
         if events:
             ev = events[-1]
@@ -664,56 +678,85 @@ class MainWindow(QMainWindow):
             html_out.append("</ul>")
         else:
             html_out.append("<p>No systemd-oomd kills this boot.</p>")
-            
+
         self.memory_oom_detail.setHtml("".join(html_out))
 
     def build_system_history_tab(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page)
-        
+
+        # Capture Frozen Plasma Area
+        capture_frame = QFrame()
+        capture_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        capture_frame.setStyleSheet("background-color: #fcfcfd; border-radius: 6px; border: 1px solid #eaecf0;")
+        capture_layout = QVBoxLayout(capture_frame)
+
+        capture_title = QLabel("Live Incident Capture")
+        capture_title.setStyleSheet("font-size: 16px; font-weight: 700; border: none;")
+        capture_help = QLabel("Use this while the Plasma panel is frozen, before restarting Plasma or logging out.")
+        capture_help.setStyleSheet("color: #475467; border: none;")
+
+        btn_layout = QHBoxLayout()
+        self.freeze_capture_btn = QPushButton("Capture Frozen Plasma Evidence")
+        self.freeze_capture_btn.setStyleSheet("font-weight: bold;")
+        self.freeze_capture_btn.clicked.connect(self.run_plasma_capture)
+
+        self.capture_status_lbl = QLabel("")
+        self.capture_status_lbl.setStyleSheet("color: #027a48; border: none;")
+
+        btn_layout.addWidget(self.freeze_capture_btn)
+        btn_layout.addWidget(self.capture_status_lbl)
+        btn_layout.addStretch()
+
+        capture_layout.addWidget(capture_title)
+        capture_layout.addWidget(capture_help)
+        capture_layout.addLayout(btn_layout)
+
+        layout.addWidget(capture_frame)
+
         load_btn = QPushButton("Load Full History (/home/josh/fedora-full-history-2026-08-27-162923.txt)")
         load_btn.clicked.connect(self.populate_system_history)
         layout.addWidget(load_btn)
-        
+
         self.history_tree = QTreeWidget()
         self.history_tree.setHeaderLabels(["Subsystem", "Title", "Status"])
         self.history_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.history_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.history_tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.history_tree.itemSelectionChanged.connect(self.show_history_detail)
-        
+
         self.history_detail = QTextBrowser()
-        
+
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self.history_tree)
         splitter.addWidget(self.history_detail)
         splitter.setSizes([300, 200])
-        
+
         layout.addWidget(splitter)
         self.tabs.addTab(page, "System History")
-        
+
     def populate_system_history(self) -> None:
         import os, html
         path = "/home/josh/fedora-full-history-2026-08-27-162923.txt"
         if not os.path.exists(path):
             self.history_detail.setText(f"File not found: {path}")
             return
-            
+
         try:
             with open(path, "r", errors="replace") as f:
                 lines = f.readlines()
         except Exception as e:
             self.history_detail.setText(f"Error reading {path}: {e}")
             return
-            
+
         issues = []
-        
+
         # Parse using doctors
         import graphics_doctor, app_crash_doctor, hardware_doctor, dadlan_doctor
-        
+
         issues.extend(graphics_doctor.analyze_graphics_events(lines))
         issues.extend(app_crash_doctor.analyze_app_crashes(lines))
         issues.extend(hardware_doctor.analyze_hardware_events(lines))
-        
+
         # DadLAN is from systemctl --failed, but for the history report let's mock it if it's there
         # Or parse systemctl output from the host right now
         import subprocess
@@ -722,7 +765,7 @@ class MainWindow(QMainWindow):
             issues.extend(dadlan_doctor.analyze_dadlan(failed_units))
         except Exception:
             pass
-            
+
         # Add Healthy findings explicitly
         def create_issue(category, title, status, evidence, action):
             return {
@@ -732,38 +775,38 @@ class MainWindow(QMainWindow):
                 "evidence": evidence,
                 "recommended_action": action,
             }
-            
+
         issues.append(create_issue("storage", "Internal NVMe", "Healthy", ["SMART: Passed", "Media errors: 0", "NVMe error-log entries: 0", "Normal temperature", "~30% wear used"], "No action required."))
         issues.append(create_issue("storage", "Btrfs", "Healthy", ["Read/write/flush errors: 0", "Corruption/generation errors: 0", "Scrub completed with no errors"], "No action required."))
         issues.append(create_issue("hardware", "RAM / CPU Hardware", "Healthy", ["No memory errors", "No memory-failure errors", "No MCE errors"], "No action required."))
         issues.append(create_issue("hardware", "Temperatures", "Healthy", ["Current CPU and NVMe temperatures are well below critical thresholds."], "No action required."))
-        
+
         self.history_tree.clear()
         self.history_issues = issues
-        
+
         # Group by category
         from collections import defaultdict
         grouped = defaultdict(list)
         for issue in issues:
             grouped[issue["category"].capitalize()].append(issue)
-            
+
         for cat, cats_issues in sorted(grouped.items()):
             parent = QTreeWidgetItem(self.history_tree, [cat, "", ""])
             for issue in cats_issues:
                 item = QTreeWidgetItem(parent, ["", issue["title"], issue["status"]])
                 item.setData(0, Qt.ItemDataRole.UserRole, issue)
         self.history_tree.expandAll()
-        
+
     def show_history_detail(self) -> None:
         selected = self.history_tree.selectedItems()
         if not selected:
             return
-            
+
         issue = selected[0].data(0, Qt.ItemDataRole.UserRole)
         if not issue:
             self.history_detail.clear()
             return
-            
+
         import html
         out = [f"<h2>{html.escape(issue['title'])}</h2>"]
         out.append(f"<p><b>Status:</b> {html.escape(issue['status'])}</p>")
@@ -773,6 +816,63 @@ class MainWindow(QMainWindow):
         out.append("</ul>")
         out.append(f"<h3>Recommended Action</h3><p>{html.escape(issue.get('recommended_action', ''))}</p>")
         self.history_detail.setHtml("".join(out))
+
+    def run_plasma_capture(self) -> None:
+        self.freeze_capture_btn.setEnabled(False)
+        self.freeze_capture_btn.setText("Capturing evidence...")
+        self.capture_status_lbl.setText("Running collectors...")
+
+        from PySide6.QtCore import QThread
+        self.capture_thread = QThread()
+        self.capture_worker = CaptureWorker()
+        self.capture_worker.moveToThread(self.capture_thread)
+        self.capture_thread.started.connect(self.capture_worker.run)
+        self.capture_worker.finished.connect(self.on_plasma_capture_finished)
+        self.capture_worker.finished.connect(self.capture_thread.quit)
+        self.capture_worker.finished.connect(self.capture_worker.deleteLater)
+        self.capture_thread.finished.connect(self.capture_thread.deleteLater)
+        self.capture_thread.start()
+
+    def on_plasma_capture_finished(self, summary: dict) -> None:
+        self.freeze_capture_btn.setEnabled(True)
+        self.freeze_capture_btn.setText("Capture Frozen Plasma Evidence")
+
+        if not summary.get("capture_complete"):
+            self.capture_status_lbl.setText(f"Capture failed: {summary.get('error', 'Unknown')}")
+            return
+
+        fc = summary.get("failed_collectors", [])
+        if fc:
+            status = f"Capture completed with {len(fc)} unavailable data sources."
+        else:
+            status = "Evidence captured successfully."
+
+        self.capture_status_lbl.setText(status)
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Frozen Plasma evidence captured")
+
+        text = [status, f"Output path: {summary.get('capture_path')}"]
+        text.append(f"Plasma PID: {summary.get('plasmashell_pid')}")
+        if summary.get("plasmashell_stat"):
+            text.append(f"Process state: {summary.get('plasmashell_stat')} | WCHAN: {summary.get('plasmashell_wchan')}")
+
+        timeout = summary.get("targeted_dbus_probe_timed_out")
+        text.append(f"D-Bus probe: {'Timed out' if timeout else 'Responded'} (Code {summary.get('dbus_probe_exit_code')})")
+
+        if summary.get("gpu_hang_in_recent_window"):
+            text.append("Recent GPU HANG found.")
+        if summary.get("i915_atomic_event_in_recent_window"):
+            text.append("Recent i915 atomic update error found.")
+
+        msg.setText("\n".join(text))
+
+        open_btn = msg.addButton("Open folder", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Ok)
+        msg.exec()
+
+        if msg.clickedButton() == open_btn and summary.get("capture_path"):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(summary["capture_path"]))
 
     def build_tests_tab(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page)
@@ -1186,14 +1286,14 @@ class MainWindow(QMainWindow):
             self.scan_start_time = now
             self.current_check_start = now
             self.current_check_label = label
-            
+
         if getattr(self, "current_check_label", "") != label:
             self.current_check_label = label
             self.current_check_start = now
 
         overall_elapsed = int(now - self.scan_start_time)
         check_elapsed = int(now - self.current_check_start)
-        
+
         overall_str = f"{overall_elapsed//60}:{overall_elapsed%60:02d}"
         check_str = f"{check_elapsed//60}:{check_elapsed%60:02d}"
 
@@ -1329,11 +1429,11 @@ class MainWindow(QMainWindow):
         if not self.report:
             self.readiness_detail.setHtml("<h2>No scan loaded</h2><p>Run a quick scan to assess crash capture readiness.</p>")
             return
-            
+
         readiness = self.report.get("readiness", {})
         html = ["<h2>Crash Capture Readiness</h2>"]
         html.append(f"<p><b>Recommendation:</b> {readiness.get('recommendation', 'Unknown')}</p>")
-        
+
         for s in readiness.get("sources", []):
             color = "green" if s.get("status") in ("ready", "verified_persistent", "available_with_records", "verified_ready", "verified_active") else "orange" if s.get("status") in ("ready_empty", "disabled_intentionally") else "red"
             html.append(f"<h3><span style='color:{color};'>&#9679;</span> {s.get('name', '')}</h3>")
@@ -1344,7 +1444,7 @@ class MainWindow(QMainWindow):
             if s.get("setup"): html.append(f"<li><b>Optional Setup:</b> {s.get('setup')}</li>")
             if s.get("implications"): html.append(f"<li><b>Implications:</b> {s.get('implications')}</li>")
             html.append(f"</ul>")
-            
+
         self.readiness_detail.setHtml("".join(html))
 
     def populate_timeline(self) -> None:
