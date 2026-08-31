@@ -255,8 +255,8 @@ class StabilityController:
         for key, value in values.items():
             if value is None:
                 continue
-            numbers = [float((item.get("chrome", {}) or {}).get("aggregate_rss_mb") if key == "chrome_rss_mb" else (item.get("plasmashell", {}) or {}).get("rss_mb") if key == "plasmashell_rss_mb" else (item.get("memory", {}) or {}).get("swap_used_mb") if key == "swap_used_mb" else (item.get("psi_mem", {}) or {}).get("some_avg10") if key == "psi_mem" else (item.get("psi_io", {}) or {}).get("full_avg10") if key == "psi_io" else item.get(key)) for item in self.history]
-            numbers = [number for number in numbers if number is not None]
+            raw_numbers = [((item.get("chrome", {}) or {}).get("aggregate_rss_mb") if key == "chrome_rss_mb" else (item.get("plasmashell", {}) or {}).get("rss_mb") if key == "plasmashell_rss_mb" else (item.get("memory", {}) or {}).get("swap_used_mb") if key == "swap_used_mb" else (item.get("psi_mem", {}) or {}).get("some_avg10") if key == "psi_mem" else (item.get("psi_io", {}) or {}).get("full_avg10") if key == "psi_io" else item.get(key)) for item in self.history]
+            numbers = [float(number) for number in raw_numbers if number is not None]
             if len(numbers) >= 5:
                 q = quantiles(numbers, n=100, method="inclusive")
                 self.baseline[key] = {"median": median(numbers), "p90": q[89], "p95": q[94], "p99": q[98]}

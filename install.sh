@@ -30,6 +30,8 @@ install -m 0755 "$SOURCE_DIR/report_schema.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/safe_mitigation.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/telemetry_timeline.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/version.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/chrome_capture.py" "$SHARE_DIR/"
+install -m 0755 "$SOURCE_DIR/plasma_capture.py" "$SHARE_DIR/"
 install -m 0644 "$SOURCE_DIR/VERSION" "$SHARE_DIR/"
 install -m 0644 "$SOURCE_DIR/README.md" "$SHARE_DIR/"
 install -m 0644 "$SOURCE_DIR/HISTORY.md" "$SHARE_DIR/" 2>/dev/null || true

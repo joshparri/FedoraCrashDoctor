@@ -42,17 +42,20 @@ KWin heartbeats, controlled tests, and a locked-down PolicyKit helper.
 
 %install
 install -d %{buildroot}%{_datadir}/fedora-crash-doctor
-install -m 0755 fedora_crash_doctor.py collector.py canary.py desktop_heartbeat.py chrome_capture.py autoscan.py host_stability_audit.py %{buildroot}%{_datadir}/fedora-crash-doctor/
+install -m 0755 fedora_crash_doctor.py collector.py canary.py desktop_heartbeat.py chrome_capture.py plasma_capture.py autoscan.py host_stability_audit.py %{buildroot}%{_datadir}/fedora-crash-doctor/
 install -m 0755 device_inventory.py freeze_classifiers.py report_schema.py safe_mitigation.py telemetry_timeline.py version.py %{buildroot}%{_datadir}/fedora-crash-doctor/
 install -m 0644 VERSION README.md LICENSE CHANGELOG.md HISTORY.md TODO.md %{buildroot}%{_datadir}/fedora-crash-doctor/
 
 install -d %{buildroot}%{_libexecdir}/fedora-crash-doctor
 install -m 0755 privileged_helper.py %{buildroot}%{_libexecdir}/fedora-crash-doctor/fedora-crash-doctor-helper
+install -m 0755 stability_notifier.py %{buildroot}%{_libexecdir}/fedora-crash-doctor/fedora-crash-doctor-stability-notifier
 
 install -d %{buildroot}%{_unitdir} %{buildroot}%{_userunitdir}
 install -m 0644 systemd/fedora-crash-doctor-canary.service %{buildroot}%{_unitdir}/
 install -m 0644 systemd/fedora-crash-doctor-autoscan.service %{buildroot}%{_unitdir}/
 install -m 0644 systemd/fedora-crash-doctor-desktop-heartbeat.service %{buildroot}%{_userunitdir}/
+install -m 0644 systemd/fedora-crash-doctor-stability.service %{buildroot}%{_userunitdir}/
+install -m 0644 systemd/fedora-crash-doctor-stability.path %{buildroot}%{_userunitdir}/
 
 install -d %{buildroot}%{_datadir}/polkit-1/actions
 install -m 0644 polkit/org.fedoracrashdoctor.policy %{buildroot}%{_datadir}/polkit-1/actions/
@@ -70,6 +73,7 @@ install -m 0644 packaging/fedora-crash-doctor.desktop %{buildroot}%{_datadir}/ap
 %post
 %systemd_post fedora-crash-doctor-canary.service fedora-crash-doctor-autoscan.service
 systemctl --global enable fedora-crash-doctor-desktop-heartbeat.service >/dev/null 2>&1 || :
+systemctl --global enable fedora-crash-doctor-stability.path >/dev/null 2>&1 || :
 
 %preun
 %systemd_preun fedora-crash-doctor-canary.service fedora-crash-doctor-autoscan.service
@@ -86,6 +90,8 @@ systemctl --global enable fedora-crash-doctor-desktop-heartbeat.service >/dev/nu
 %{_unitdir}/fedora-crash-doctor-canary.service
 %{_unitdir}/fedora-crash-doctor-autoscan.service
 %{_userunitdir}/fedora-crash-doctor-desktop-heartbeat.service
+%{_userunitdir}/fedora-crash-doctor-stability.service
+%{_userunitdir}/fedora-crash-doctor-stability.path
 %{_datadir}/polkit-1/actions/org.fedoracrashdoctor.policy
 %{_datadir}/applications/fedora-crash-doctor.desktop
 
