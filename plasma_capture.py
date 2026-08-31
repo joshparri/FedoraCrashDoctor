@@ -38,11 +38,11 @@ def get_kwin_pid() -> int:
         pass
     return 0
 
-def capture_frozen_plasma() -> dict[str, Any]:
+def capture_frozen_plasma(home: Path | None = None) -> dict[str, Any]:
     start_time = datetime.now(timezone.utc)
     # Using microseconds to avoid directory collisions, with deterministic suffix retry
     ts = start_time.strftime("%Y%m%d-%H%M%S-%f")
-    base_dir = Path.home() / ".local" / "share" / "FedoraCrashDoctor" / "captures"
+    base_dir = (home or Path.home()) / ".local" / "share" / "FedoraCrashDoctor" / "captures"
     base_dir.mkdir(parents=True, exist_ok=True)
 
     capture_dir = base_dir / f"plasma-freeze-{ts}"
@@ -117,6 +117,36 @@ def capture_frozen_plasma() -> dict[str, Any]:
 
     save("memory.txt", "\n".join(mem_info))
 
+    # 2.5. Filesystem & Network Mounts
+    fs_info = []
+    # 2.5.a. Bounded df
+    fs_info.append("--- timeout 5s df -h ---")
+    fs_info.append(_run(["timeout", "5", "df", "-h"], timeout=6.0))
+    
+    # 2.5.b. D-state processes
+    fs_info.append("\n--- D-state processes ---")
+    d_state = _run(["ps", "-eo", "pid,stat,wchan:32,comm,args"], timeout=3.0)
+    d_procs = [line for line in d_state.splitlines() if len(line.split()) > 1 and line.split()[1].startswith("D")]
+    fs_info.append("\n".join(d_procs) if d_procs else "No processes in D-state")
+    summary["d_state_processes"] = len(d_procs)
+
+    # 2.5.c. Bounded stat on network mounts
+    fs_info.append("\n--- Network mount stat probes ---")
+    mounts = _run(["findmnt", "-n", "-O", "_netdev,cifs,fuse,nfs", "-o", "TARGET"], timeout=3.0)
+    for m in mounts.splitlines():
+        target = m.strip()
+        if target:
+            fs_info.append(f"stat {target}:")
+            fs_info.append(_run(["timeout", "2", "stat", target], timeout=3.0))
+
+    # 2.5.d. CIFS Debug Data
+    fs_info.append("\n--- /proc/fs/cifs/DebugData ---")
+    fs_info.append(read_file("/proc/fs/cifs/DebugData"))
+    fs_info.append("\n--- /proc/fs/cifs/Stats ---")
+    fs_info.append(read_file("/proc/fs/cifs/Stats"))
+
+    save("filesystem-diagnostics.txt", "\n".join(fs_info))
+
     # 3. Plasma service
     service_props = _run(["systemctl", "--user", "show", "plasma-plasmashell.service"])
     save("plasma-service.txt", service_props + "\n\n--- STATUS ---\n" + _run(["systemctl", "--user", "status", "plasma-plasmashell.service", "--no-pager", "-l"]))
@@ -144,6 +174,15 @@ def capture_frozen_plasma() -> dict[str, Any]:
 
         threads_out = _run(["ps", "-L", "-p", str(plasma_pid), "-o", "pid,tid,ppid,stat,wchan:40,pcpu,pmem,comm"])
         save("plasmashell-threads.txt", threads_out)
+        
+        # Analyze threads for D-state / specific wchan
+        d_threads = []
+        for line in threads_out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 8 and parts[3].startswith("D"):
+                d_threads.append(line)
+        if d_threads:
+            summary["plasmashell_d_state_threads"] = d_threads
 
         try:
             fd_list = []

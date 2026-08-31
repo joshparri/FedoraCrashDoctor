@@ -179,6 +179,42 @@ class PlasmaCaptureTests(unittest.TestCase):
             self.assertTrue(summary["i915_atomic_event_in_recent_window"])
             self.assertTrue(summary["gpu_reset_in_recent_window"])
 
+    @patch('plasma_capture._run')
+    @patch('plasma_capture.subprocess.run')
+    @patch('plasma_capture.Path.home')
+    def test_cifs_network_filesystem_deadlock(self, mock_home, mock_sub_run, mock_run):
+        """Sanitised regression fixture for Plasma freeze caused by blocked network filesystem"""
+        with tempfile.TemporaryDirectory() as tmp:
+            mock_home.return_value = Path(tmp)
+
+            def mock_run_side_effect(cmd, *args, **kwargs):
+                if cmd == ["systemctl", "--user", "show", "--property=MainPID", "--value", "plasma-plasmashell.service"]:
+                    return "1234\n"
+                elif cmd[:2] == ["timeout", "5"] and "df" in cmd:
+                    return "[TIMEOUT] Command exceeded 5 seconds"
+                elif cmd[:2] == ["ps", "-eo"] and "wchan" in cmd[-1]:
+                    return "  PID STAT WCHAN                           COMMAND\n 1609 D    fuse_dev_do_read                  bindfs"
+                elif cmd[:2] == ["ps", "-L"] and "wchan" in cmd[-1]:
+                    return "  PID   TID  PPID STAT WCHAN                                    %CPU %MEM COMMAND\n 1234  1234     1 Ssl  do_epoll_wait                             1.0  1.0 plasmashell\n 1234 17191     1 D    fuse_dev_do_read                          0.0  0.0 krunner_placesr"
+                return ""
+
+            mock_run.side_effect = mock_run_side_effect
+            mock_sub_run.return_value = MagicMock(stdout="test", returncode=0, stderr="")
+
+            summary = plasma_capture.capture_frozen_plasma()
+            
+            # Verify the deadlock is properly recorded
+            self.assertEqual(summary["d_state_processes"], 1)
+            self.assertIn("plasmashell_d_state_threads", summary)
+            self.assertEqual(len(summary["plasmashell_d_state_threads"]), 1)
+            self.assertIn("krunner_placesr", summary["plasmashell_d_state_threads"][0])
+
+            capture_path = Path(summary["capture_path"])
+            fs_file = capture_path / "filesystem-diagnostics.txt"
+            self.assertTrue(fs_file.exists())
+            self.assertIn("[TIMEOUT]", fs_file.read_text())
+            self.assertIn("bindfs", fs_file.read_text())
+
     def test_no_dangerous_commands_in_source(self):
         source = Path(plasma_capture.__file__).read_text()
 
