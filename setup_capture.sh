@@ -12,15 +12,21 @@ echo
 echo "Configuring persistent system journal…"
 install -d -m 2755 /var/log/journal
 install -d -m 0755 /etc/systemd/journald.conf.d
-cat >/etc/systemd/journald.conf.d/99-fedora-crash-doctor.conf <<'EOF'
+CONF_FILE="/etc/systemd/journald.conf.d/99-fedora-crash-doctor.conf"
+if [[ ! -f "$CONF_FILE" ]] || ! grep -q "SystemMaxUse=1G" "$CONF_FILE"; then
+  cat > "$CONF_FILE" <<'EOF'
 [Journal]
 Storage=persistent
 SystemMaxUse=1G
 MaxRetentionSec=30day
 Compress=yes
 EOF
-systemctl restart systemd-journald
-journalctl --flush || true
+  systemctl restart systemd-journald
+  journalctl --flush || true
+else
+  echo "Persistent system journal already configured."
+fi
+
 
 enable_if_present() {
   local unit="$1"
@@ -41,12 +47,16 @@ enable_if_present cockpit.socket
 echo
 echo "Preparing kdump kernel crash capture…"
 if command -v kdumpctl >/dev/null 2>&1; then
-  if kdumpctl reset-crashkernel; then
-    echo "Crashkernel reservation written to installed kernel entries."
+  if systemctl is-enabled kdump.service >/dev/null 2>&1 && grep -qi "crashkernel=" /proc/cmdline; then
+    echo "kdump is already configured and active in the boot command line. Skipping reset."
   else
-    echo "kdumpctl could not set the crashkernel reservation automatically."
+    if kdumpctl reset-crashkernel; then
+      echo "Crashkernel reservation written to installed kernel entries."
+    else
+      echo "kdumpctl could not set the crashkernel reservation automatically."
+    fi
+    systemctl enable kdump.service || true
   fi
-  systemctl enable kdump.service || true
   echo "Kdump status before reboot:"
   kdumpctl status || true
   echo

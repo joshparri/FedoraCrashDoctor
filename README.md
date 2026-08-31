@@ -211,6 +211,17 @@ Boot-time autoscan and private baselines:
 /var/lib/fedora-crash-doctor/
 ```
 
+## Proactive Stability Guard
+
+The canary records lightweight rolling telemetry and the desktop heartbeat
+records measured KWin ping latency and consecutive failures. Stability Guard
+uses debounced NORMAL, WARNING and CRITICAL states, observes trends such as
+Chrome aggregate RSS and swap growth, and can preserve read-only Chrome or
+Plasma evidence when a sustained warning begins. Aggregate RSS can double-count
+shared pages; increasing RSS is reported as sustained memory growth observed,
+not as proof of a leak. Automatic capture never kills processes, restarts
+services, changes browser or kernel settings, logs out, or reboots.
+
 ## Limits
 
 No diagnostic application can guarantee a cause for every hard crash. Sudden

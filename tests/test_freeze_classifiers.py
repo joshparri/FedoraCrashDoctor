@@ -28,6 +28,13 @@ class FreezeClassifierTests(unittest.TestCase):
         memory = [item for item in classes if item["id"] == "memory_pressure_desktop_starvation"][0]
         self.assertEqual(memory["confidence"], "high")
 
+    def test_i915_error_alone_does_not_prove_compositor_hang(self):
+        classes = classify_freeze_evidence([
+            {"id": "intel_display", "evidence": ["i915: [drm] *ERROR* Atomic update failure on pipe B"]},
+        ])
+        self.assertEqual(classes[0]["confidence"], "low")
+        self.assertIn("cause unresolved", classes[0]["title"])
+
     def test_pcie_aer_is_low_confidence_without_correlation(self):
         classes = classify_freeze_evidence([
             {"id": "pcie", "evidence": ["rtw88_8821ce 0000:02:00.0: PCIe Bus Error: severity=Correctable"]}

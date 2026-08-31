@@ -13,20 +13,50 @@ from pathlib import Path
 INTERVAL = 5
 
 
-def kwin_ping() -> bool | None:
-    if os.environ.get("XDG_CURRENT_DESKTOP", "").lower().find("kde") < 0:
-        return None
+def session_environment() -> tuple[str, str]:
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
+    session_type = os.environ.get("XDG_SESSION_TYPE", "")
+    if not desktop or not session_type:
+        try:
+            result = subprocess.run(
+                ["loginctl", "show-session", os.environ.get("XDG_SESSION_ID", ""), "-p", "Type", "-p", "Desktop"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, text=True,
+            )
+            for line in result.stdout.splitlines():
+                key, _, value = line.partition("=")
+                if key == "Type" and not session_type:
+                    session_type = value
+                elif key == "Desktop" and not desktop:
+                    desktop = value
+        except Exception:
+            pass
+    return desktop or "unknown", session_type or "unknown"
+
+
+def runtime_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={env['XDG_RUNTIME_DIR']}/bus")
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+    return env
+
+
+def kwin_ping() -> tuple[bool | None, float | None]:
+    desktop, _session_type = session_environment()
+    if "kde" not in desktop.lower() and desktop != "unknown":
+        return None, None
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             ["gdbus", "call", "--session", "--dest", "org.kde.KWin", "--object-path", "/KWin", "--method", "org.freedesktop.DBus.Peer.Ping"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
-            env=os.environ.copy(),
+            env=runtime_environment(),
         )
-        return proc.returncode == 0
+        return proc.returncode == 0, round((time.monotonic() - started) * 1000, 2)
     except Exception:
-        return False
+        return False, round((time.monotonic() - started) * 1000, 2)
 
 
 def process_present(name: str) -> bool:
@@ -63,14 +93,20 @@ def atomic_write(path: Path, payload: dict) -> None:
 def main() -> int:
     runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
     target = runtime / "fedora-crash-doctor" / "desktop-heartbeat.json"
+    consecutive_failures = 0
     while True:
+        desktop, session_type = session_environment()
+        kwin_ok, kwin_ping_ms = kwin_ping()
+        consecutive_failures = consecutive_failures + 1 if kwin_ok is False else 0
         payload = {
             "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "epoch": time.time(),
-            "kwin_ok": kwin_ping(),
+            "kwin_ok": kwin_ok,
+            "kwin_ping_ms": kwin_ping_ms,
+            "kwin_consecutive_failures": consecutive_failures,
             "plasmashell_ok": process_present("plasmashell"),
-            "session": os.environ.get("XDG_SESSION_TYPE", "unknown"),
-            "desktop": os.environ.get("XDG_CURRENT_DESKTOP", "unknown"),
+            "session": session_type,
+            "desktop": desktop,
         }
         try:
             atomic_write(target, payload)

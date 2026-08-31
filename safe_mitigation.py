@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections import deque
+from statistics import median, quantiles
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,7 @@ def evaluate_sample(sample: dict[str, Any]) -> dict[str, Any]:
     hb_age = sample.get("desktop_heartbeat_age_s")
     kwin_ok = sample.get("kwin_ok")
     plasma_ok = sample.get("plasmashell_ok")
+    journal_events = sample.get("journal_events") or {}
 
     severity = "ok"
     category = "healthy"
@@ -70,6 +73,11 @@ def evaluate_sample(sample: dict[str, Any]) -> dict[str, Any]:
         category = "desktop"
         title = "Plasmashell missing"
         reasons = ["plasmashell is not running, but KWin is OK."]
+    elif journal_events.get("graphics"):
+        severity = "warning"
+        category = "desktop"
+        title = "Display-stack errors observed"
+        reasons = ["Recent kernel graphics evidence was recorded; this does not establish causation."]
     elif mem_avail_pct < 0.08 and swap_used_pct > 0.85:
         # Fallback to critical if missing PSI data but RAM is completely exhausted
         severity = "critical"
@@ -122,12 +130,16 @@ def evaluate_sample(sample: dict[str, Any]) -> dict[str, Any]:
 
 
 class StabilityController:
-    def __init__(self, owner_config: Path = Path("/etc/fedora-crash-doctor/owner.json"), out_dir: Path = Path("/run/fedora-crash-doctor")):
+    def __init__(self, owner_config: Path = Path("/etc/fedora-crash-doctor/owner.json"), out_dir: Path = Path("/run/fedora-crash-doctor"), capture_callback=None):
         self.state = "ok" # ok, pending, warning, critical, recovering
         self.pressure_count = 0
         self.recovery_count = 0
         self.owner_config = owner_config
         self.out_dir = out_dir
+        self.capture_callback = capture_callback
+        self.history: deque[dict[str, Any]] = deque(maxlen=360)
+        self.baseline: dict[str, dict[str, float]] = {}
+        self.last_capture_monotonic = 0.0
         
     def get_owner(self) -> dict[str, int] | None:
         try:
@@ -139,7 +151,28 @@ class StabilityController:
             return None
         
     def process_sample(self, sample: dict[str, Any]) -> dict[str, Any] | None:
+        self.history.append(sample)
+        self._update_baseline(sample)
         eval_result = evaluate_sample(sample)
+        trend = self.trends()
+        eval_result["trends"] = trend
+        if trend.get("chrome_rss_mb_per_min", 0) >= 50 and eval_result["severity"] == "ok":
+            eval_result["severity"] = "warning"
+            eval_result["category"] = "memory"
+            eval_result["title"] = "Chrome memory growth observed"
+            eval_result["reasons"] = [f"Chrome aggregate RSS is growing at {trend['chrome_rss_mb_per_min']:.1f} MB/min.", "This is sustained memory growth observed, not proof of a memory leak."]
+        if trend.get("swap_mb_per_min", 0) >= 50 and eval_result["severity"] == "ok":
+            eval_result["severity"] = "warning"
+            eval_result["category"] = "memory"
+            eval_result["title"] = "Swap use is increasing"
+            eval_result["reasons"] = [f"Swap use is increasing at {trend['swap_mb_per_min']:.1f} MB/min."]
+        latency = sample.get("kwin_ping_ms")
+        if latency is not None and latency > max(250, self.baseline.get("kwin_ping_ms", {}).get("p95", 0) * 3):
+            if eval_result["severity"] == "ok":
+                eval_result["severity"] = "warning"
+                eval_result["category"] = "desktop"
+                eval_result["title"] = "KWin response latency is abnormally high"
+                eval_result["reasons"] = [f"KWin ping latency: {latency:.1f} ms."]
         raw_sev = eval_result["severity"]
 
         if raw_sev in {"warning", "critical"}:
@@ -193,16 +226,80 @@ class StabilityController:
                 "timestamp": eval_result.get("timestamp", ""),
                 "automatic_action_taken": False
             }
+            out["health_state"] = {"ok": "NORMAL", "warning": "WARNING", "critical": "CRITICAL", "recovering": "WARNING"}.get(self.state, "NORMAL")
+            out["trends"] = eval_result.get("trends", {})
+            out["baseline"] = self.baseline
             if self.state in {"recovering", "ok"}:
                 out["title"] = "System recovered"
                 out["reasons"] = ["Pressure has subsided and conditions are healthy."]
                 out["recommended_actions"] = []
                 out["category"] = "healthy"
             
+            self._capture_evidence(out, sample)
             self._notify_user(out)
             return out
 
         return None
+
+    def _update_baseline(self, sample: dict[str, Any]) -> None:
+        if len(self.history) < 12:
+            return
+        values = {
+            "kwin_ping_ms": sample.get("kwin_ping_ms"),
+            "chrome_rss_mb": (sample.get("chrome", {}) or {}).get("aggregate_rss_mb"),
+            "plasmashell_rss_mb": (sample.get("plasmashell", {}) or {}).get("rss_mb"),
+            "swap_used_mb": (sample.get("memory", {}) or {}).get("swap_used_mb"),
+            "psi_mem": (sample.get("psi_mem", {}) or {}).get("some_avg10"),
+            "psi_io": (sample.get("psi_io", {}) or {}).get("full_avg10"),
+        }
+        for key, value in values.items():
+            if value is None:
+                continue
+            numbers = [float((item.get("chrome", {}) or {}).get("aggregate_rss_mb") if key == "chrome_rss_mb" else (item.get("plasmashell", {}) or {}).get("rss_mb") if key == "plasmashell_rss_mb" else (item.get("memory", {}) or {}).get("swap_used_mb") if key == "swap_used_mb" else (item.get("psi_mem", {}) or {}).get("some_avg10") if key == "psi_mem" else (item.get("psi_io", {}) or {}).get("full_avg10") if key == "psi_io" else item.get(key)) for item in self.history]
+            numbers = [number for number in numbers if number is not None]
+            if len(numbers) >= 5:
+                q = quantiles(numbers, n=100, method="inclusive")
+                self.baseline[key] = {"median": median(numbers), "p90": q[89], "p95": q[94], "p99": q[98]}
+
+    def trends(self) -> dict[str, float]:
+        if len(self.history) < 2:
+            return {}
+        first, last = self.history[0], self.history[-1]
+        elapsed = max(1.0, float(last.get("epoch", 0) or 0) - float(first.get("epoch", 0) or 0))
+        def delta(path: tuple[str, ...]) -> float:
+            def value(item):
+                current: Any = item
+                for key in path:
+                    current = current.get(key) if isinstance(current, dict) else None
+                return float(current) if current is not None else None
+            a, b = value(first), value(last)
+            return ((b - a) / elapsed) * 60 if a is not None and b is not None else 0.0
+        return {
+            "chrome_rss_mb_per_min": delta(("chrome", "aggregate_rss_mb")),
+            "swap_mb_per_min": delta(("memory", "swap_used_mb")),
+            "zram_mb_per_min": delta(("memory", "zram_used_mb")),
+            "kwin_latency_ms_per_min": delta(("kwin_ping_ms",)),
+            "psi_mem_per_min": delta(("psi_mem", "some_avg10")),
+            "psi_io_per_min": delta(("psi_io", "full_avg10")),
+        }
+
+    def _capture_evidence(self, event: dict[str, Any], sample: dict[str, Any]) -> None:
+        if not self.capture_callback or event.get("state") not in {"warning", "critical"}:
+            return
+        import time
+        now = time.monotonic()
+        if event.get("state") == "warning" and now - self.last_capture_monotonic < 600:
+            return
+        try:
+            event["trigger_reason"] = event.get("title", "")
+            event["trigger_metrics"] = {key: value for key, value in (event.get("trends") or {}).items() if value}
+            event["trigger_time"] = event.get("timestamp", "")
+            path = self.capture_callback(event, sample)
+            event["evidence_capture_path"] = str(path) if path else None
+            event["automatic_action_taken"] = bool(path)
+            self.last_capture_monotonic = now
+        except Exception as exc:
+            event["capture_error"] = str(exc)
         
     def _notify_user(self, payload: dict[str, Any]) -> None:
         owner = self.get_owner()

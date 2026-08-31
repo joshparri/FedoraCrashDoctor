@@ -21,7 +21,7 @@ from safe_mitigation import StabilityController
 
 LOG_DIR = Path("/var/log/fedora-crash-doctor")
 LOG_FILE = LOG_DIR / "canary.log"
-NORMAL_INTERVAL = 15
+NORMAL_INTERVAL = 5
 WARNING_INTERVAL = 5
 CRITICAL_INTERVAL = 2
 FSYNC_EVERY_NORMAL = 60
@@ -64,6 +64,14 @@ def memory() -> dict[str, int]:
         match = re.search(r"(\d+)", value)
         if match:
             values[key] = int(match.group(1)) // 1024
+    swap_devices = []
+    for line in read_text("/proc/swaps").splitlines()[1:]:
+        bits = line.split()
+        if len(bits) >= 4:
+            try:
+                swap_devices.append({"name": bits[0], "type": bits[1], "size_mb": int(bits[2]) // 1024, "used_mb": int(bits[3]) // 1024})
+            except ValueError:
+                pass
     return {
         "mem_available_mb": values.get("MemAvailable", 0),
         "mem_total_mb": values.get("MemTotal", 0),
@@ -78,6 +86,9 @@ def memory() -> dict[str, int]:
         "file_mb": values.get("Active(file)", 0) + values.get("Inactive(file)", 0),
         "swapcached_mb": values.get("SwapCached", 0),
         "pagetables_mb": values.get("PageTables", 0),
+        "zram_used_mb": sum(item["used_mb"] for item in swap_devices if item["name"].startswith("/dev/zram")),
+        "disk_swap_used_mb": sum(item["used_mb"] for item in swap_devices if not item["name"].startswith("/dev/zram")),
+        "swap_devices": swap_devices,
     }
 
 
@@ -238,14 +249,83 @@ def desktop_heartbeat() -> dict[str, Any]:
                 newest = (stamp, data)
         except Exception: pass
     if not newest:
-        return {"desktop_heartbeat_age_s": None, "kwin_ok": None}
+        return {"desktop_heartbeat_age_s": None, "kwin_ok": None, "kwin_ping_ms": None, "kwin_consecutive_failures": None, "plasmashell_ok": None, "desktop_session": None, "desktop": None}
     stamp, data = newest
     return {
         "desktop_heartbeat_age_s": round(max(0, now - stamp), 1),
         "kwin_ok": data.get("kwin_ok"),
+        "kwin_ping_ms": data.get("kwin_ping_ms"),
+        "kwin_consecutive_failures": data.get("kwin_consecutive_failures", 0),
         "plasmashell_ok": data.get("plasmashell_ok"),
         "desktop_session": data.get("session"),
+        "desktop": data.get("desktop"),
     }
+
+
+def chrome_summary() -> dict[str, Any]:
+    processes = []
+    for pid_str in os.listdir("/proc"):
+        if not pid_str.isdigit():
+            continue
+        try:
+            pid = int(pid_str)
+            cmdline = read_text(f"/proc/{pid}/cmdline").replace("\0", " ").strip()
+            if not re.search(r"(?:google-chrome|chromium|chrome)", cmdline, re.I):
+                continue
+            status = read_text(f"/proc/{pid}/status")
+            rss = next((int(line.split()[1]) for line in status.splitlines() if line.startswith("VmRSS:")), 0)
+            processes.append({"pid": pid, "rss_kb": rss, "type": next((part.split("=", 1)[1] for part in cmdline.split() if part.startswith("--type=")), "browser"), "gpu": "--type=gpu-process" in cmdline})
+        except (OSError, ValueError):
+            pass
+    total_rss_kb = sum(item["rss_kb"] for item in processes)
+    return {
+        "process_count": len(processes),
+        "aggregate_rss_mb": round(total_rss_kb / 1024, 1),
+        "aggregate_rss_note": "Aggregate RSS may double-count shared pages and is not exact unique physical RAM.",
+        "largest_process_rss_mb": round(max((item["rss_kb"] for item in processes), default=0) / 1024, 1),
+        "gpu_process_present": any(item["gpu"] for item in processes),
+    }
+
+
+def recent_journal_events() -> dict[str, str]:
+    result = {"graphics": "", "storage": "", "kernel": ""}
+    try:
+        output = subprocess.run(
+            ["journalctl", "-k", "-b", "0", "--since=-60 seconds", "--output=short-iso-precise", "--no-pager"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, text=True,
+        ).stdout
+        result["kernel"] = output
+        result["graphics"] = "\n".join(line for line in output.splitlines() if re.search(r"i915|drm|GPU HANG|GPU reset|atomic update failure", line, re.I))
+        result["storage"] = "\n".join(line for line in output.splitlines() if re.search(r"I/O error|Buffer I/O|nvme.*error|ata.*link down|btrfs.*error", line, re.I))
+    except Exception:
+        pass
+    return result
+
+
+def filesystem_free_mb(path: str = "/") -> int | None:
+    try:
+        stat = os.statvfs(path)
+        return int(stat.f_bavail * stat.f_frsize / (1024 * 1024))
+    except OSError:
+        return None
+
+
+def automatic_capture(event: dict[str, Any], sample_data: dict[str, Any]) -> str | None:
+    """Capture implicated user evidence without terminating or restarting anything."""
+    try:
+        owner = json.loads(Path("/etc/fedora-crash-doctor/owner.json").read_text())
+        home = Path(owner["home"])
+        paths = []
+        chrome_triggered = event.get("category") == "memory" and sample_data.get("chrome", {}).get("process_count", 0) > 0
+        if event.get("state") == "critical" or chrome_triggered:
+            import chrome_capture
+            paths.append(chrome_capture.capture_chrome_incident(home=home).get("capture_path"))
+        if event.get("state") == "critical" or event.get("category") == "desktop" or sample_data.get("kwin_ok") is False:
+            import plasma_capture
+            paths.append(plasma_capture.capture_frozen_plasma(home=home).get("capture_path"))
+        return ", ".join(path for path in paths if path) or None
+    except Exception:
+        return None
 
 
 def sample(controller: StabilityController, last_detailed_time: float) -> tuple[dict[str, Any], int, float]:
@@ -280,6 +360,7 @@ def sample(controller: StabilityController, last_detailed_time: float) -> tuple[
         "psi_mem": psi_mem,
         "psi_io": psi_io,
         "zram": zram_stats(),
+        "filesystem_free_mb": filesystem_free_mb(),
     }
     
     now = time.monotonic()
@@ -294,9 +375,16 @@ def sample(controller: StabilityController, last_detailed_time: float) -> tuple[
         row["vmstat"] = vmstat()
         row["diskstats"] = diskstats()
         row["processes"] = gather_processes()
+        row["journal_events"] = recent_journal_events()
+        row["memory_events"] = read_text("/sys/fs/cgroup/memory.events")
+        try:
+            row["systemd_oomd_active"] = subprocess.run(["systemctl", "is-active", "systemd-oomd.service"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, text=True).stdout.strip() == "active"
+        except Exception:
+            row["systemd_oomd_active"] = None
         last_detailed_time = now
 
     row.update(desktop_heartbeat())
+    row["chrome"] = chrome_summary()
 
     row["early_warning"] = controller.process_sample(row)
 
@@ -314,7 +402,7 @@ def main() -> int:
     next_fsync = time.monotonic()
     last_detailed = 0.0
 
-    controller = StabilityController()
+    controller = StabilityController(capture_callback=automatic_capture)
     while True:
         started = time.monotonic()
         try:

@@ -13,6 +13,7 @@ class StabilityGuardTests(unittest.TestCase):
         
     def _mem_sample(self, avail_mb, total_mb=16000, swap_used=0, some_psi=0, io_full=0, hb_age=0):
         return {
+            "epoch": len(getattr(self, "samples", [])) * 5,
             "memory": {"mem_available_mb": avail_mb, "mem_total_mb": total_mb, "swap_used_mb": swap_used, "swap_total_mb": 8192},
             "psi_mem": {"some_avg10": some_psi},
             "psi_io": {"full_avg10": io_full},
@@ -21,6 +22,41 @@ class StabilityGuardTests(unittest.TestCase):
             "plasmashell_ok": True,
             "processes": {"top_rss": [{"name": "chrome", "group": "Google Chrome", "rss_kb": 3_500_000}]}
         }
+
+    def test_low_available_memory_alone_is_not_critical(self):
+        sample = self._mem_sample(700, total_mb=16000, swap_used=0, some_psi=0, io_full=0)
+        self.assertNotEqual(self.controller.process_sample(sample), "critical")
+
+    def test_normal_zram_use_is_not_memory_failure(self):
+        sample = self._mem_sample(8000, swap_used=2000, some_psi=0, io_full=0)
+        self.assertIsNone(self.controller.process_sample(sample))
+        self.assertEqual(self.controller.state, "ok")
+
+    def test_chrome_sustained_growth_is_observed_not_leak(self):
+        results = []
+        for index in range(12):
+            sample = self._mem_sample(8000)
+            sample["epoch"] = index * 60
+            sample["chrome"] = {"aggregate_rss_mb": 1000 + index * 100}
+            result = self.controller.process_sample(sample)
+            if result:
+                results.append(result)
+        self.assertEqual(self.controller.state, "warning")
+        self.assertTrue(any("sustained memory growth observed" in " ".join(result["reasons"]) for result in results))
+        self.assertFalse(any("memory leak" in result["title"].lower() for result in results))
+
+    def test_automatic_capture_is_rate_limited(self):
+        captured = []
+        self.controller.capture_callback = lambda event, sample: captured.append(event["trigger_reason"]) or "/tmp/capture"
+        for _ in range(2):
+            self.controller.process_sample(self._mem_sample(1000, swap_used=6000, some_psi=15))
+        self.assertEqual(len(captured), 1)
+        self.controller.process_sample(self._mem_sample(8000))
+        for _ in range(5):
+            self.controller.process_sample(self._mem_sample(8000))
+        for _ in range(2):
+            self.controller.process_sample(self._mem_sample(1000, swap_used=6000, some_psi=15))
+        self.assertEqual(len(captured), 1)
 
     def test_transient_pressure_does_not_notify(self):
         # 1 warning sample

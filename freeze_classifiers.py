@@ -63,10 +63,13 @@ def classify_freeze_evidence(findings: list[dict[str, Any]], canary: dict[str, A
         display_score += 2
         display_supports.append("Desktop heartbeat became stale while system telemetry still existed.")
     if display_score:
+        display_symptom_observed = bool(re.search(r"kwin.*(?:unresponsive|hang|stall)|compositor.*(?:unresponsive|hang|stall)", all_evidence, re.I))
+        display_confidence = "high" if display_score >= 5 and (display_symptom_observed or any((sample.get("desktop_heartbeat_age_s") or 0) > 20 and sample.get("kwin_ok") is False for sample in samples[-20:])) else "low" if display_score <= 3 else "moderate"
+        display_title = "Display-stack / compositor hang" if display_symptom_observed else "Display-stack error observed; cause unresolved"
         classes.append({
             "id": "display_stack_compositor_hang",
-            "title": "Display-stack / compositor hang",
-            "confidence": "high" if display_score >= 5 else "moderate",
+            "title": display_title,
+            "confidence": display_confidence,
             "supports": display_supports,
             "conflicts": [],
             "missing": ["TTY reachability during the event"] if display_score < 5 else [],

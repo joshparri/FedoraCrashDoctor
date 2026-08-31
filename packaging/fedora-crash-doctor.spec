@@ -42,7 +42,7 @@ KWin heartbeats, controlled tests, and a locked-down PolicyKit helper.
 
 %install
 install -d %{buildroot}%{_datadir}/fedora-crash-doctor
-install -m 0755 fedora_crash_doctor.py collector.py canary.py desktop_heartbeat.py autoscan.py host_stability_audit.py %{buildroot}%{_datadir}/fedora-crash-doctor/
+install -m 0755 fedora_crash_doctor.py collector.py canary.py desktop_heartbeat.py chrome_capture.py autoscan.py host_stability_audit.py %{buildroot}%{_datadir}/fedora-crash-doctor/
 install -m 0755 device_inventory.py freeze_classifiers.py report_schema.py safe_mitigation.py telemetry_timeline.py version.py %{buildroot}%{_datadir}/fedora-crash-doctor/
 install -m 0644 VERSION README.md LICENSE CHANGELOG.md HISTORY.md TODO.md %{buildroot}%{_datadir}/fedora-crash-doctor/
 

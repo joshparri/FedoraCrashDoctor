@@ -261,6 +261,21 @@ class CaptureWorker(QObject):
         except Exception as e:
             self.finished.emit({"capture_complete": False, "error": str(e), "failed_collectors": ["all"]})
 
+
+class ChromeCaptureWorker(QObject):
+    finished = Signal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        try:
+            import chrome_capture
+            self.finished.emit(chrome_capture.capture_chrome_incident())
+        except Exception as e:
+            self.finished.emit({"capture_complete": False, "error": str(e), "failed_collectors": ["all"]})
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -513,6 +528,7 @@ class MainWindow(QMainWindow):
         latest_event = "None"
         latest_recovery = "None"
         last_warning = None
+        latest_sample = {}
 
         if log_path.exists():
             try:
@@ -526,6 +542,7 @@ class MainWindow(QMainWindow):
                     try:
                         import json
                         data = json.loads(line)
+                        latest_sample = data
                         if "psi_mem" in data:
                             current_mem_psi = f"{data['psi_mem'].get('some_avg10', 0):.1f}%"
                         if "psi_io" in data:
@@ -559,6 +576,11 @@ class MainWindow(QMainWindow):
             f"<li><b>systemd-oomd:</b> {'Active' if oomd_active else 'Inactive'}</li>",
             f"<li><b>Current memory pressure:</b> {current_mem_psi}</li>",
             f"<li><b>Current I/O pressure:</b> {current_io_psi}</li>",
+            f"<li><b>Health state:</b> {str((latest_sample.get('early_warning') or {}).get('health_state', 'NORMAL'))}</li>",
+            f"<li><b>KWin latency:</b> {latest_sample.get('kwin_ping_ms', 'Unknown')} ms</li>",
+            f"<li><b>Chrome:</b> {(latest_sample.get('chrome') or {}).get('aggregate_rss_mb', 'Unknown')} MB aggregate RSS</li>",
+            f"<li><b>Chrome processes:</b> {(latest_sample.get('chrome') or {}).get('process_count', 'Unknown')}</li>",
+            f"<li><b>Swap:</b> {(latest_sample.get('memory') or {}).get('swap_used_mb', 'Unknown')} / {(latest_sample.get('memory') or {}).get('swap_total_mb', 'Unknown')} MB</li>",
             "</ul>",
         ]
 
@@ -700,8 +722,15 @@ class MainWindow(QMainWindow):
         self.freeze_capture_btn.setStyleSheet("font-weight: bold;")
         self.freeze_capture_btn.clicked.connect(self.run_plasma_capture)
 
+        self.chrome_capture_btn = QPushButton("Capture Chrome Crash / Freeze Evidence")
+        self.chrome_capture_btn.setStyleSheet("font-weight: bold;")
+        self.chrome_capture_btn.clicked.connect(self.run_chrome_capture)
+
         self.capture_status_lbl = QLabel("")
         self.capture_status_lbl.setStyleSheet("color: #027a48; border: none;")
+
+        self.chrome_capture_status_lbl = QLabel("")
+        self.chrome_capture_status_lbl.setStyleSheet("color: #027a48; border: none;")
 
         btn_layout.addWidget(self.freeze_capture_btn)
         btn_layout.addWidget(self.capture_status_lbl)
@@ -711,9 +740,18 @@ class MainWindow(QMainWindow):
         capture_layout.addWidget(capture_help)
         capture_layout.addLayout(btn_layout)
 
+        chrome_layout = QHBoxLayout()
+        chrome_help = QLabel("Use this before force-closing Chrome.")
+        chrome_help.setStyleSheet("color: #475467; border: none;")
+        chrome_layout.addWidget(self.chrome_capture_btn)
+        chrome_layout.addWidget(chrome_help)
+        chrome_layout.addWidget(self.chrome_capture_status_lbl)
+        chrome_layout.addStretch()
+        capture_layout.addLayout(chrome_layout)
+
         layout.addWidget(capture_frame)
 
-        load_btn = QPushButton("Load Full History (/home/josh/fedora-full-history-2026-08-27-162923.txt)")
+        load_btn = QPushButton("Load Full History...")
         load_btn.clicked.connect(self.populate_system_history)
         layout.addWidget(load_btn)
 
@@ -736,7 +774,10 @@ class MainWindow(QMainWindow):
 
     def populate_system_history(self) -> None:
         import os, html
-        path = "/home/josh/fedora-full-history-2026-08-27-162923.txt"
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Select Full History File", "", "Text Files (*.txt);;All Files (*)")
+        if not path:
+            return
         if not os.path.exists(path):
             self.history_detail.setText(f"File not found: {path}")
             return
@@ -871,6 +912,44 @@ class MainWindow(QMainWindow):
         msg.addButton(QMessageBox.StandardButton.Ok)
         msg.exec()
 
+        if msg.clickedButton() == open_btn and summary.get("capture_path"):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(summary["capture_path"]))
+
+    def run_chrome_capture(self) -> None:
+        self.chrome_capture_btn.setEnabled(False)
+        self.chrome_capture_btn.setText("Capturing Chrome evidence...")
+        self.chrome_capture_status_lbl.setText("Reading processes and bounded journals...")
+
+        from PySide6.QtCore import QThread
+        self.chrome_capture_thread = QThread()
+        self.chrome_capture_worker = ChromeCaptureWorker()
+        self.chrome_capture_worker.moveToThread(self.chrome_capture_thread)
+        self.chrome_capture_thread.started.connect(self.chrome_capture_worker.run)
+        self.chrome_capture_worker.finished.connect(self.on_chrome_capture_finished)
+        self.chrome_capture_worker.finished.connect(self.chrome_capture_thread.quit)
+        self.chrome_capture_worker.finished.connect(self.chrome_capture_worker.deleteLater)
+        self.chrome_capture_thread.finished.connect(self.chrome_capture_thread.deleteLater)
+        self.chrome_capture_thread.start()
+
+    def on_chrome_capture_finished(self, summary: dict) -> None:
+        self.chrome_capture_btn.setEnabled(True)
+        self.chrome_capture_btn.setText("Capture Chrome Crash / Freeze Evidence")
+        if not summary.get("capture_complete"):
+            self.chrome_capture_status_lbl.setText(f"Capture failed: {summary.get('error', 'Unknown')}")
+            return
+
+        failed = summary.get("failed_collectors", [])
+        status = f"Capture completed with {len(failed)} unavailable data sources." if failed else "Chrome evidence captured successfully."
+        self.chrome_capture_status_lbl.setText(status)
+        lines = [status, f"Output path: {summary.get('capture_path')}", f"Chrome processes: {summary.get('chrome_process_count', 0)}", "Aggregate RSS is not exact unique physical RAM."]
+        for item in summary.get("classifications", []):
+            lines.append(f"{item.get('type')}: {item.get('observation')}")
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Chrome crash / freeze evidence captured")
+        msg.setText("\n".join(lines))
+        open_btn = msg.addButton("Open folder", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Ok)
+        msg.exec()
         if msg.clickedButton() == open_btn and summary.get("capture_path"):
             QDesktopServices.openUrl(QUrl.fromLocalFile(summary["capture_path"]))
 
