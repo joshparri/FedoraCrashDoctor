@@ -11,6 +11,7 @@ Requires:       python3
 Requires:       python3-pyside6
 Requires:       polkit
 Requires:       systemd
+Requires:       libnotify
 Recommends:     inxi
 Recommends:     smartmontools
 Recommends:     nvme-cli
