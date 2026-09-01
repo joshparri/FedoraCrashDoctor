@@ -130,16 +130,17 @@ def evaluate_sample(sample: dict[str, Any]) -> dict[str, Any]:
 
 
 class StabilityController:
-    def __init__(self, owner_config: Path = Path("/etc/fedora-crash-doctor/owner.json"), out_dir: Path = Path("/run/fedora-crash-doctor"), capture_callback=None):
+    def __init__(self, owner_config: Path = Path("/etc/fedora-crash-doctor/owner.json"), out_dir: Path = Path("/run/fedora-crash-doctor"), capture_callback=None, capture_cooldown: float = 600.0):
         self.state = "ok" # ok, pending, warning, critical, recovering
         self.pressure_count = 0
         self.recovery_count = 0
         self.owner_config = owner_config
         self.out_dir = out_dir
         self.capture_callback = capture_callback
+        self.capture_cooldown = max(0.0, float(capture_cooldown))
         self.history: deque[dict[str, Any]] = deque(maxlen=360)
         self.baseline: dict[str, dict[str, float]] = {}
-        self.last_capture_monotonic = 0.0
+        self.last_capture_monotonic = -float('inf')
         
     def get_owner(self) -> dict[str, int] | None:
         try:
@@ -288,7 +289,7 @@ class StabilityController:
             return
         import time
         now = time.monotonic()
-        if event.get("state") == "warning" and now - self.last_capture_monotonic < 600:
+        if event.get("state") == "warning" and now - self.last_capture_monotonic < self.capture_cooldown:
             return
         try:
             event["trigger_reason"] = event.get("title", "")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,18 +46,47 @@ class StabilityGuardTests(unittest.TestCase):
         self.assertTrue(any("sustained memory growth observed" in " ".join(result["reasons"]) for result in results))
         self.assertFalse(any("memory leak" in result["title"].lower() for result in results))
 
-    def test_automatic_capture_is_rate_limited(self):
+    @patch('time.monotonic')
+    def test_automatic_capture_is_rate_limited(self, mock_monotonic):
         captured = []
+        self.controller.capture_cooldown = 600.0
         self.controller.capture_callback = lambda event, sample: captured.append(event["trigger_reason"]) or "/tmp/capture"
+        
+        # Test 1: First capture allowed
+        mock_monotonic.return_value = 100.0
         for _ in range(2):
             self.controller.process_sample(self._mem_sample(1000, swap_used=6000, some_psi=15))
         self.assertEqual(len(captured), 1)
+        
+        # Test 2: Immediate second capture denied
+        mock_monotonic.return_value = 110.0
         self.controller.process_sample(self._mem_sample(8000))
-        for _ in range(5):
-            self.controller.process_sample(self._mem_sample(8000))
+        self.controller.process_sample(self._mem_sample(8000))
         for _ in range(2):
             self.controller.process_sample(self._mem_sample(1000, swap_used=6000, some_psi=15))
         self.assertEqual(len(captured), 1)
+        
+        # Test 3: Capture after configured cooldown allowed
+        mock_monotonic.return_value = 701.0
+        self.controller.process_sample(self._mem_sample(8000))
+        self.controller.process_sample(self._mem_sample(8000))
+        for _ in range(2):
+            self.controller.process_sample(self._mem_sample(1000, swap_used=6000, some_psi=15))
+        self.assertEqual(len(captured), 2)
+        
+        # Test 4: Non-default cooldown values
+        self.controller.capture_cooldown = 100.0
+        mock_monotonic.return_value = 802.0
+        self.controller.process_sample(self._mem_sample(8000))
+        self.controller.process_sample(self._mem_sample(8000))
+        for _ in range(2):
+            self.controller.process_sample(self._mem_sample(1000, swap_used=6000, some_psi=15))
+        self.assertEqual(len(captured), 3)
+
+        # Test 5: Negative cooldown is clamped to zero
+        from safe_mitigation import StabilityController
+        c = StabilityController(capture_cooldown=-50.0)
+        self.assertEqual(c.capture_cooldown, 0.0)
 
     def test_transient_pressure_does_not_notify(self):
         # 1 warning sample
