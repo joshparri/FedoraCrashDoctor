@@ -306,6 +306,7 @@ def build_tasks(mode: str) -> list[Task]:
         Task("current_kernel_errors", "Current boot kernel warnings and errors", ["journalctl", "-b", "0", "-k", "-p", "warning..alert", "--no-pager", "-o", "short-iso-precise"], 50, "Software"),
         Task("failed_units", "Failed system services", ["systemctl", "--failed", "--no-pager", "--plain"], 20, "Software"),
         Task("coredumps", "Application core dumps", ["coredumpctl", "list", "--since", "30 days ago", "--no-pager"], 35, "Software"),
+        Task("coredumps_json", "Structured Application core dumps", ["journalctl", "-t", "systemd-coredump", "-o", "json", "--since", "30 days ago"], 35, "Software"),
         Task("inxi", "System and driver inventory", ["inxi", "-Fxxxz", "--no-host"], 45, "Software"),
         Task("pci", "PCI hardware and active drivers", ["lspci", "-Dnnk"], 25, "PCIe / Network"),
         Task("usb", "USB device tree", ["lsusb", "-tv"], 20, "PCIe / Network"),

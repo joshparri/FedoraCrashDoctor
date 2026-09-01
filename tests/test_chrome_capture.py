@@ -45,7 +45,9 @@ class ChromeCaptureTests(unittest.TestCase):
         self.assertIn("30 seconds before", item["observation"])
 
     def test_chrome_coredump_is_distinct_process_crash(self):
-        result = chrome_capture.classify_chrome_incident(summary(), {"coredumps": "chrome 1234 core", "chrome": ""})
+        import json
+        mock_json = json.dumps({"COREDUMP_PID": "1234", "COREDUMP_EXE": "/opt/google/chrome/chrome", "__REALTIME_TIMESTAMP": "1788303225056929", "COREDUMP_SIGNAL_NAME": "SIGSEGV"})
+        result = chrome_capture.classify_chrome_incident(summary(), {"coredumps": mock_json, "chrome": ""})
         self.assertEqual(result[0]["type"], "confirmed_process_crash")
 
     def test_process_vanished_without_evidence_is_unknown(self):

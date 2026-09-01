@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from coredump_adapter import parse_systemd_coredump_json
+
 
 CHROME_NAMES = {"chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"}
 JOURNAL_FILES = (
@@ -248,9 +250,19 @@ def classify_chrome_incident(summary: dict[str, Any], journals: dict[str, str]) 
     if compositor_lines:
         classifications.append({"type": "chrome_compositor_stall_observed", "observation": "Chrome logged a long-running CompositorAnimationObserver; this records a Chrome symptom only.", "evidence": compositor_lines})
 
-    coredump_lines = [line for line in journals.get("coredumps", "").splitlines() if re.search(r"chrome|chromium|crashpad", line, re.I) and not re.search(r"No coredumps", line, re.I)]
-    if coredump_lines:
-        classifications.append({"type": "confirmed_process_crash", "observation": "coredumpctl lists a Chrome/Chromium/Crashpad coredump.", "evidence": coredump_lines})
+    try:
+        raw_coredumps = journals.get("coredumps", "").splitlines()
+        structured_coredumps = parse_systemd_coredump_json(raw_coredumps, resolve_packages=False)
+        coredump_evidence = [
+            f"{c['timestamp']} {c['executable']} PID {c['pid']} Signal {c['signal_name']}"
+            for c in structured_coredumps
+            if c.get("executable") and re.search(r"chrome|chromium|crashpad", c["executable"], re.I)
+        ]
+    except Exception:
+        coredump_evidence = []
+        
+    if coredump_evidence:
+        classifications.append({"type": "confirmed_process_crash", "observation": "systemd-coredump reports a Chrome/Chromium/Crashpad coredump.", "evidence": coredump_evidence})
 
     symptoms = [(time, line) for time, line in current_lines if COMPOSITOR_RE.search(line)]
     display_lines = [(time, line) for time, line in current_lines if re.search(r"i915|drm|kwin_wayland|GPU HANG|GPU reset", line, re.I)]
@@ -310,7 +322,7 @@ def capture_chrome_incident(
     system_journal = runner(["journalctl", "-b", "0", f"--since={since_arg}", "--output=short-iso-precise", "--no-pager"], 8)
     user_journal = runner(["journalctl", "--user", "-b", "0", f"--since={since_arg}", "--output=short-iso-precise", "--no-pager"], 8)
     oomd = runner(["journalctl", "-u", "systemd-oomd", "-b", "0", f"--since={since_arg}", "--output=short-iso-precise", "--no-pager"], 8)
-    coredumps = runner(["coredumpctl", "list", "-b", "0", "--no-pager"], 8)
+    coredumps = runner(["journalctl", "-t", "systemd-coredump", "-o", "json", "-b", "0"], 8)
     crashpad_text, crashpad_records = collect_crashpad(capture_time, home)
     journals = {
         "oomd": oomd,

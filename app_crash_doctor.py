@@ -2,6 +2,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 import hashlib
+import json
+from coredump_adapter import parse_systemd_coredump_json
 
 def parse_coredumpctl_line(line: str) -> dict[str, Any] | None:
     match = re.match(r"^\w{3}\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+\w+\s+(\d+)\s+\d+\s+\d+\s+(\w+)\s+(\w+)\s+(\S+)\s+(.+)$", line.strip())
@@ -35,7 +37,30 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
     raw_count = 0
     unique_crashes = {}
     
+    # First pass: try to parse any structured JSON lines (new format)
+    structured = parse_systemd_coredump_json(lines, resolve_packages=False)
+    for incident in structured:
+        # Convert to the internal representation used by this doctor
+        dt = datetime.fromtimestamp(incident["timestamp"]) if incident["timestamp"] else datetime.now()
+        parsed = {
+            "time": dt,
+            "pid": str(incident["pid"]) if incident["pid"] else "unknown",
+            "signal": str(incident["signal"]) if incident["signal"] else "unknown",
+            "status": "present" if incident.get("core_available") else "missing",
+            "exe": incident["executable"] or "unknown",
+            "size": "unknown",
+            "raw": f"{incident['timestamp']} {incident['executable']}"
+        }
+        raw_count += 1
+        eid = f"{parsed['time'].isoformat()}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
+        if eid not in unique_crashes:
+            unique_crashes[eid] = parsed
+            crashes.append(parsed)
+            
     for line in lines:
+        if line.startswith("{"):
+            continue # Already handled by parse_systemd_coredump_json
+            
         parsed = parse_coredumpctl_line(line)
         if parsed:
             raw_count += 1
@@ -45,16 +70,27 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
                 unique_crashes[eid] = parsed
                 crashes.append(parsed)
 
-    by_app = {}
+    # Count raw appearances for each executable basename
+    # We count from both structured and parsed legacy lines directly
     app_raw_counts = {}
+    
+    for incident in structured:
+        if incident.get("executable"):
+            app_name = incident["executable"].split("/")[-1]
+            app_raw_counts[app_name] = app_raw_counts.get(app_name, 0) + 1
+            
     for line in lines:
+        if line.startswith("{"):
+            continue
         p = parse_coredumpctl_line(line)
         if p:
             app_name = p["exe"].split("/")[-1]
             app_raw_counts[app_name] = app_raw_counts.get(app_name, 0) + 1
 
+    by_app = {}
     for c in crashes:
         app_name = c["exe"].split("/")[-1]
+        
         if app_name not in by_app:
             by_app[app_name] = []
         by_app[app_name].append(c)
