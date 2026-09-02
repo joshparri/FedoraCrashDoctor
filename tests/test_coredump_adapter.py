@@ -138,19 +138,26 @@ def test_deduplication_same_boot_same_event():
     
 def test_get_systemd_coredumps_respects_limits(monkeypatch):
     import coredump_adapter
+    import io
+    
     # We mock Popen so we don't actually run journalctl
     class MockPopen:
         def __init__(self, *args, **kwargs):
-            self.stdout = [
+            lines = [
                 json.dumps({"_BOOT_ID": "b1", "COREDUMP_PID": "1" + str(i), "COREDUMP_EXE": "/bin/crash"}) + "\n"
-                for i in range(1500) # Give it 1500 lines
+                for i in range(150) # Give it 150 lines
             ]
+            self.stdout = io.BytesIO("".join(lines).encode('utf-8'))
+            
         def kill(self):
             pass
         def wait(self, timeout):
             pass
             
     monkeypatch.setattr("subprocess.Popen", MockPopen)
+    
+    # Also mock select.select so it doesn't block on our BytesIO
+    monkeypatch.setattr("select.select", lambda r, w, x, t: (r, w, x))
     
     incidents = coredump_adapter.get_systemd_coredumps(max_records=100)
     # Bounding check, should exit after 100 records
