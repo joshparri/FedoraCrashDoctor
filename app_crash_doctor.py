@@ -41,19 +41,29 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
     structured = parse_systemd_coredump_json(lines, resolve_packages=False)
     for incident in structured:
         # Convert to the internal representation used by this doctor
-        dt = datetime.fromtimestamp(incident["timestamp"]) if incident["timestamp"] else datetime.now()
+        dt = datetime.fromtimestamp(incident["timestamp"]) if incident["timestamp"] is not None else None
+        
+        ca = incident.get("core_available", "unknown")
+        if ca is True:
+            status = "present"
+        elif ca is False:
+            status = "missing"
+        else:
+            status = "unknown"
+            
         parsed = {
             "time": dt,
             "pid": str(incident["pid"]) if incident["pid"] else "unknown",
             "signal": str(incident["signal"]) if incident["signal"] else "unknown",
-            "status": "present" if incident.get("core_available") else "missing",
+            "status": status,
             "exe": incident["executable"] or "unknown",
             "size": "unknown",
             "raw": f"{incident['timestamp']} {incident['executable']}"
         }
         raw_count += 1
         boot_part = incident.get("boot_id") or "unknown_boot"
-        eid = f"{boot_part}_{parsed['time'].isoformat()}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
+        time_part = parsed['time'].isoformat() if parsed['time'] else "unknown_time"
+        eid = f"{boot_part}_{time_part}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
         if eid not in unique_crashes:
             unique_crashes[eid] = parsed
             crashes.append(parsed)
@@ -109,7 +119,7 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
     now = datetime.now()
     
     for app_name, evs in by_app.items():
-        evs.sort(key=lambda x: x["time"])
+        evs.sort(key=lambda x: x["time"].timestamp() if x["time"] else 0)
         total_count = len(evs)
         
         if total_count < 3 and "antigravity" not in app_name.lower():
@@ -118,7 +128,7 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
         first_seen = evs[0]["time"]
         last_seen = evs[-1]["time"]
         
-        today_crashes = [c for c in evs if (now - c["time"]).total_seconds() < 86400]
+        today_crashes = [c for c in evs if c["time"] and (now - c["time"]).total_seconds() < 86400]
         
         paths = list(set(c["exe"] for c in evs))
         signals = list(set(c["signal"] for c in evs))
@@ -129,8 +139,8 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
             f"Unique incidents: {total_count}",
             f"Raw evidence appearances: {app_raw_counts.get(app_name, 0)}",
             f"Recent/current boot crashes: {len(today_crashes)}",
-            f"First seen: {first_seen.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Last seen: {last_seen.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"First seen: {first_seen.strftime('%Y-%m-%d %H:%M:%S') if first_seen else 'Unknown'}",
+            f"Last seen: {last_seen.strftime('%Y-%m-%d %H:%M:%S') if last_seen else 'Unknown'}",
             f"Most recent coredump: {last['status']} ({last['size']})",
             f"Signals observed: {', '.join(signals)}",
         ]

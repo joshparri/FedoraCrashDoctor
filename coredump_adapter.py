@@ -120,22 +120,41 @@ def get_systemd_coredumps(since: str = "30 days ago", max_records: int = 1000, m
     incidents = []
     total_bytes = 0
     
+    import time
+    import select
+    
     try:
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True
+            stderr=subprocess.DEVNULL
         )
         
-        for line in proc.stdout:
-            line_len = len(line.encode('utf-8'))
+        start_time = time.time()
+        timeout = 20
+        
+        while True:
+            if time.time() - start_time > timeout:
+                proc.kill()
+                break
+                
+            # Use select to wait for data up to 1 second, so we can enforce overall timeout
+            ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+            if not ready:
+                continue
+                
+            # Read up to 200KB per line safely
+            line_bytes = proc.stdout.readline(200000)
+            if not line_bytes:
+                break
+                
+            line_len = len(line_bytes)
             if total_bytes + line_len > max_bytes:
                 proc.kill()
                 break
                 
             total_bytes += line_len
-            line = line.strip()
+            line = line_bytes.decode('utf-8', errors='replace').strip()
             
             if not line:
                 continue
@@ -148,8 +167,10 @@ def get_systemd_coredumps(since: str = "30 days ago", max_records: int = 1000, m
                 proc.kill()
                 break
                 
-        proc.wait(timeout=5)
+        proc.wait(timeout=2)
     except Exception:
-        pass
+        if 'proc' in locals():
+            proc.kill()
     
     return incidents
+
