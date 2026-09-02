@@ -160,6 +160,67 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
             f"Signals observed: {', '.join(signals)}",
         ]
         
+        if last['status'] == 'present' and str(last['pid']).isdigit():
+            import threading
+            import subprocess
+            import os
+            import select
+            
+            def run_gdb(pid_str: str, exe_path: str, ts_str: str):
+                env = os.environ.copy()
+                env["DEBUGINFOD_URLS"] = "https://debuginfod.fedoraproject.org/"
+                
+                cmd = [
+                    "coredumpctl", "gdb", pid_str,
+                    "--batch",
+                    "-ex", "set pagination off",
+                    "-ex", "thread apply all bt full",
+                    "-ex", "quit"
+                ]
+                
+                try:
+                    def set_limits():
+                        import resource
+                        resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
+                        resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+                        resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
+                    
+                    proc = subprocess.Popen(
+                        cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, preexec_fn=set_limits
+                    )
+                    
+                    output = b""
+                    while True:
+                        ready, _, _ = select.select([proc.stdout], [], [], 60.0)
+                        if not ready:
+                            proc.kill()
+                            output += b"\n\n[TRUNCATED: GDB analysis timed out]"
+                            break
+                        chunk = proc.stdout.read(4096)
+                        if not chunk:
+                            break
+                        output += chunk
+                        if len(output) > 5 * 1024 * 1024:
+                            proc.kill()
+                            output += b"\n\n[TRUNCATED: Output exceeded 5MB limit]"
+                            break
+                    proc.wait(timeout=5)
+                    
+                    out_dir = "/var/log/fedora-crash-doctor/backtraces"
+                    os.makedirs(out_dir, exist_ok=True, mode=0o700)
+                    safe_exe = exe_path.split('/')[-1] if exe_path else 'unknown'
+                    out_path = os.path.join(out_dir, f"{pid_str}_{safe_exe}_{ts_str}.txt")
+                    with open(out_path, "wb") as f:
+                        f.write(output)
+                except Exception:
+                    if 'proc' in locals() and proc.poll() is None:
+                        proc.kill()
+
+            ts_str = str(int(last['time'].timestamp())) if last['time'] else "0"
+            t = threading.Thread(target=run_gdb, args=(str(last['pid']), last['exe'], ts_str), daemon=True)
+            t.start()
+            evidence.append("Symbolic backtrace resolution initiated in background.")
+
         if len(paths) > 1:
             evidence.append(f"Executable path changed across history: {', '.join(paths)}")
             
