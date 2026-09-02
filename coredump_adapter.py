@@ -27,6 +27,15 @@ def _get_package_info(executable: str) -> dict[str, str]:
         pass
     return {}
 
+def _safe_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_systemd_coredump_json(lines: list[str], resolve_packages: bool = True) -> list[dict[str, Any]]:
     """Parse structured JSON lines from journalctl -t systemd-coredump -o json"""
     incidents = []
@@ -53,11 +62,11 @@ def parse_systemd_coredump_json(lines: list[str], resolve_packages: bool = True)
         incident = {
             "incident_source": "systemd-coredump",
             "boot_id": entry.get("_BOOT_ID"),
-            "timestamp": int(entry.get("__REALTIME_TIMESTAMP", 0)) / 1000000.0 if "__REALTIME_TIMESTAMP" in entry else None,
-            "pid": int(entry.get("COREDUMP_PID")) if entry.get("COREDUMP_PID") else None,
-            "uid": int(entry.get("COREDUMP_UID")) if entry.get("COREDUMP_UID") else None,
-            "gid": int(entry.get("COREDUMP_GID")) if entry.get("COREDUMP_GID") else None,
-            "signal": int(entry.get("COREDUMP_SIGNAL")) if entry.get("COREDUMP_SIGNAL") else None,
+            "timestamp": _safe_int(entry.get("__REALTIME_TIMESTAMP")) / 1000000.0 if _safe_int(entry.get("__REALTIME_TIMESTAMP")) is not None else None,
+            "pid": _safe_int(entry.get("COREDUMP_PID")),
+            "uid": _safe_int(entry.get("COREDUMP_UID")),
+            "gid": _safe_int(entry.get("COREDUMP_GID")),
+            "signal": _safe_int(entry.get("COREDUMP_SIGNAL")),
             "signal_name": entry.get("COREDUMP_SIGNAL_NAME"),
             "executable": exe,
             "command": entry.get("COREDUMP_CMDLINE"),
@@ -71,7 +80,7 @@ def parse_systemd_coredump_json(lines: list[str], resolve_packages: bool = True)
                 "location": entry.get("COREDUMP_FILENAME"),
             },
             
-            "core_available": "COREDUMP_FILENAME" in entry,
+            "core_available": "unknown", # Changed per requirements
             "metadata_available": True,
             "journal_cursor": entry.get("__CURSOR"),
             
@@ -97,19 +106,50 @@ def parse_systemd_coredump_json(lines: list[str], resolve_packages: bool = True)
         
     return incidents
 
-def get_systemd_coredumps(since: str = "30 days ago") -> list[dict[str, Any]]:
-    """Fetch structured coredump evidence directly from the systemd journal."""
+def get_systemd_coredumps(since: str = "30 days ago", max_records: int = 1000, max_bytes: int = 10 * 1024 * 1024) -> list[dict[str, Any]]:
+    """Fetch structured coredump evidence directly from the systemd journal with bounded memory and process streaming."""
+    fields = [
+        "__CURSOR", "__REALTIME_TIMESTAMP", "_BOOT_ID", "COREDUMP_PID", "COREDUMP_UID",
+        "COREDUMP_GID", "COREDUMP_SIGNAL", "COREDUMP_SIGNAL_NAME", "COREDUMP_EXE", "_EXE",
+        "COREDUMP_CMDLINE", "COREDUMP_COMM", "COREDUMP_UNIT", "_SYSTEMD_UNIT", "COREDUMP_USER_UNIT",
+        "_HOSTNAME", "COREDUMP_FILENAME"
+    ]
+    
+    cmd = ["journalctl", "-t", "systemd-coredump", "-o", "json", "--since", since, f"--output-fields={','.join(fields)}"]
+    
+    incidents = []
+    total_bytes = 0
+    
     try:
-        result = subprocess.run(
-            ["journalctl", "-t", "systemd-coredump", "-o", "json", "--since", since],
-            capture_output=True,
-            text=True,
-            timeout=30
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True
         )
-        if result.returncode == 0:
-            lines = result.stdout.strip().split("\\n")
-            return parse_systemd_coredump_json(lines)
+        
+        for line in proc.stdout:
+            line_len = len(line.encode('utf-8'))
+            if total_bytes + line_len > max_bytes:
+                proc.kill()
+                break
+                
+            total_bytes += line_len
+            line = line.strip()
+            
+            if not line:
+                continue
+            
+            # parse line individually
+            parsed = parse_systemd_coredump_json([line], resolve_packages=True)
+            incidents.extend(parsed)
+            
+            if len(incidents) >= max_records:
+                proc.kill()
+                break
+                
+        proc.wait(timeout=5)
     except Exception:
         pass
     
-    return []
+    return incidents

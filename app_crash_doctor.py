@@ -52,7 +52,8 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
             "raw": f"{incident['timestamp']} {incident['executable']}"
         }
         raw_count += 1
-        eid = f"{parsed['time'].isoformat()}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
+        boot_part = incident.get("boot_id") or "unknown_boot"
+        eid = f"{boot_part}_{parsed['time'].isoformat()}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
         if eid not in unique_crashes:
             unique_crashes[eid] = parsed
             crashes.append(parsed)
@@ -65,7 +66,7 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
         if parsed:
             raw_count += 1
             # deduplicate by time, pid, exe, signal
-            eid = f"{parsed['time'].isoformat()}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
+            eid = f"legacy_{parsed['time'].isoformat()}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
             if eid not in unique_crashes:
                 unique_crashes[eid] = parsed
                 crashes.append(parsed)
