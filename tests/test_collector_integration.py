@@ -2,16 +2,53 @@ import pytest
 import collector
 import shutil
 
-def test_collector_coredumps_json_task_is_bounded():
-    # Ordinary quick scan gets built
-    tasks = collector.build_tasks("quick")
+
+def test_collector_includes_normalized_coredumps_in_report(monkeypatch):
+    import json
     
-    task = next((t for t in tasks if t.key == "coredumps_json"), None)
-    assert task is not None
+    # Mock get_systemd_coredumps to return a structured kwin_wayland crash
+    def mock_get_coredumps(*args, **kwargs):
+        return [{
+            "incident_source": "systemd-coredump",
+            "boot_id": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            "timestamp": 1788137700.0,
+            "pid": 9999,
+            "signal": 11,
+            "signal_name": "SIGSEGV",
+            "executable": "/usr/bin/kwin_wayland",
+            "core_available": True,
+            "raw_source_hash": "abc"
+        }]
+        
+    monkeypatch.setattr("coredump_adapter.get_systemd_coredumps", mock_get_coredumps)
     
-    cmd = task.command
-    assert "--output-fields" in " ".join(cmd)
+    # Mock runner and boots to create a clean environment
+    class MockRunner:
+        def __init__(self, *args, **kwargs):
+            self.cancelled = False
+        def execute(self):
+            return {
+                "journal_boots": {"output": " 0 b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1 Mon 2026-08-31 10:00:00 AEST—Mon 2026-08-31 11:00:00 AEST"}
+            }
+            
+    monkeypatch.setattr("collector.CheckRunner", MockRunner)
     
-    # Check that we explicitly exclude unbounded COREDUMP 
-    assert "COREDUMP" not in "".join(cmd) or "COREDUMP_PID" in "".join(cmd)
-    assert "--output-fields=__CURSOR,__REALTIME_TIMESTAMP,_BOOT_ID,COREDUMP_PID,COREDUMP_UID,COREDUMP_GID,COREDUMP_SIGNAL,COREDUMP_SIGNAL_NAME,COREDUMP_EXE,_EXE,COREDUMP_CMDLINE,COREDUMP_COMM,COREDUMP_UNIT,_SYSTEMD_UNIT,COREDUMP_USER_UNIT,_HOSTNAME,COREDUMP_FILENAME" in " ".join(cmd)
+    # Mock validate_report so we don't need a full valid report schema
+    monkeypatch.setattr("collector.validate_report", lambda x: None)
+    
+    report = collector.collect("quick")
+    incidents = report.get("incidents", [])
+    
+    # We should have an active session incident for boot 0 (b1) 
+    assert len(incidents) >= 1
+    kwin_incident = next(i for i in incidents if i["boot_id"] == "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1")
+    
+    # Verify coredump is attached to the incident
+    assert "coredumps" in kwin_incident
+    assert len(kwin_incident["coredumps"]) == 1
+    core = kwin_incident["coredumps"][0]
+    
+    assert core["pid"] == 9999
+    assert core["executable"] == "/usr/bin/kwin_wayland"
+    assert core["signal"] == 11
+    assert core["boot_id"] == "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"

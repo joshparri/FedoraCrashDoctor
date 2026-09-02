@@ -75,11 +75,26 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
         parsed = parse_coredumpctl_line(line)
         if parsed:
             raw_count += 1
-            # deduplicate by time, pid, exe, signal
-            eid = f"legacy_{parsed['time'].isoformat()}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
-            if eid not in unique_crashes:
-                unique_crashes[eid] = parsed
-                crashes.append(parsed)
+            # deduplicate by time, pid, exe, signal against ALL known crashes
+            # since legacy lines don't have a boot_id, we just use a weak time-based check
+            # if we already have a structured crash with this time/pid/exe/sig, skip it!
+            time_str = parsed['time'].isoformat()
+            
+            # Check if this matches any existing crash
+            matched = False
+            for existing in crashes:
+                if (existing['time'] == parsed['time'] and 
+                    existing['pid'] == parsed['pid'] and 
+                    existing['exe'] == parsed['exe'] and 
+                    existing['signal'] == parsed['signal']):
+                    matched = True
+                    break
+                    
+            if not matched:
+                eid = f"legacy_{time_str}_{parsed['pid']}_{parsed['exe']}_{parsed['signal']}"
+                if eid not in unique_crashes:
+                    unique_crashes[eid] = parsed
+                    crashes.append(parsed)
 
     # Count raw appearances for each executable basename
     # We count from both structured and parsed legacy lines directly

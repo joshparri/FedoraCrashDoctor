@@ -306,7 +306,6 @@ def build_tasks(mode: str) -> list[Task]:
         Task("current_kernel_errors", "Current boot kernel warnings and errors", ["journalctl", "-b", "0", "-k", "-p", "warning..alert", "--no-pager", "-o", "short-iso-precise"], 50, "Software"),
         Task("failed_units", "Failed system services", ["systemctl", "--failed", "--no-pager", "--plain"], 20, "Software"),
         Task("coredumps", "Application core dumps", ["coredumpctl", "list", "--since", "30 days ago", "--no-pager"], 35, "Software"),
-        Task("coredumps_json", "Structured Application core dumps", ["journalctl", "-t", "systemd-coredump", "-o", "json", "--since", "30 days ago", "--output-fields=__CURSOR,__REALTIME_TIMESTAMP,_BOOT_ID,COREDUMP_PID,COREDUMP_UID,COREDUMP_GID,COREDUMP_SIGNAL,COREDUMP_SIGNAL_NAME,COREDUMP_EXE,_EXE,COREDUMP_CMDLINE,COREDUMP_COMM,COREDUMP_UNIT,_SYSTEMD_UNIT,COREDUMP_USER_UNIT,_HOSTNAME,COREDUMP_FILENAME"], 35, "Software"),
         Task("inxi", "System and driver inventory", ["inxi", "-Fxxxz", "--no-host"], 45, "Software"),
         Task("pci", "PCI hardware and active drivers", ["lspci", "-Dnnk"], 25, "PCIe / Network"),
         Task("usb", "USB device tree", ["lsusb", "-tv"], 20, "PCIe / Network"),
@@ -1082,7 +1081,21 @@ def build_incidents(findings, checks):
 
     report_incidents = []
     for inc in incidents:
-        if not inc["events"] and inc["boundary"] in {"active session", "clean shutdown"}:
+        boot_obj = boots.get(inc["boot"], {})
+        boot_id = boot_obj.get("id", "unknown")
+        
+        # Associate normalized coredumps that fall into this incident's bounds
+        incident_coredumps = []
+        structured_coredumps = checks.get("coredumps_json", {}).get("structured_evidence", [])
+        if structured_coredumps:
+            for c in structured_coredumps:
+                if c.get("boot_id") == boot_id and c.get("timestamp"):
+                    # Check if timestamp falls within incident bounds
+                    naive_ts = datetime.fromtimestamp(c["timestamp"])
+                    if inc["start"] <= naive_ts <= inc["end"]:
+                        incident_coredumps.append(c)
+
+        if not inc["events"] and not incident_coredumps and inc["boundary"] in {"active session", "clean shutdown"}:
             continue
 
         symptoms = {}
@@ -1218,14 +1231,14 @@ def build_incidents(findings, checks):
 
         conf_exp = f"Ranked {best['confidence']} based on timing and severity." if best else "No evidence."
 
-        boot_obj = boots.get(inc["boot"], {})
         report_incidents.append({
-            "boot_id": boot_obj.get("id", "unknown"),
+            "boot_id": boot_id,
             "boot_index": inc["boot"],
             "incident_start": inc["start"].isoformat(),
             "incident_end": inc["end"].isoformat(),
             "failure_boundary": inc["boundary"],
             "incident_evidence": [e for e in inc["events"] if e["timestamp"]],
+            "coredumps": incident_coredumps,
             "strongest_hypothesis": best["title"] if best else "Unknown",
             "supporting_evidence": best["supports"] if best else [],
             "next_step": best["next_test"] if best else "Gather more evidence.",
@@ -1597,6 +1610,19 @@ def collect(
     checks = runner.execute()
     if not runner.cancelled:
         add_virtual_checks(checks)
+        from coredump_adapter import get_systemd_coredumps
+        incidents = get_systemd_coredumps()
+        checks["coredumps_json"] = {
+            "title": "Structured Application core dumps",
+            "category": "Software",
+            "status": "ok",
+            "state": "completed",
+            "output": "",
+            "command": "coredump_adapter.get_systemd_coredumps()",
+            "returncode": 0,
+            "duration_seconds": 0.0,
+            "structured_evidence": incidents
+        }
     findings, context = analyse(checks)
     timeline = build_timeline(checks)
     canary = analyse_canary(checks)

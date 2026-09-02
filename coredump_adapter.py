@@ -99,7 +99,15 @@ def parse_systemd_coredump_json(lines: list[str], resolve_packages: bool = True)
             pkg_info = pkg_cache[exe]
             incident.update(pkg_info)
             
-        raw_hash = hashlib.sha256(line.encode("utf-8")).hexdigest()
+        canonical = {
+            "boot_id": incident["boot_id"],
+            "timestamp": incident["timestamp"],
+            "pid": incident["pid"],
+            "executable": incident["executable"],
+            "signal": incident["signal"],
+            "hostname": incident["hostname"]
+        }
+        raw_hash = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
         incident["raw_source_hash"] = raw_hash
         
         incidents.append(incident)
