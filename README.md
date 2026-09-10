@@ -228,3 +228,20 @@ No diagnostic application can guarantee a cause for every hard crash. Sudden
 power loss, firmware deadlock, motherboard failure or some GPU lockups can stop
 the machine before the final evidence is written. Ranked causes are explicit
 hypotheses based on the evidence available, not certainty.
+
+
+### Background symbolic backtraces
+
+For recurring application crashes with a present core, Stage 2 runs bounded
+`coredumpctl debug` analysis in the background. GDB is optional; Fedora debuginfod
+is explicitly enabled for symbol downloads. Each worker has a 60-second elapsed
+limit, 60-second CPU limit, 1 GiB address-space limit and 10 MiB output cap.
+Backtraces can contain process memory values; files are private (0600) in a
+private (0700) directory. Unprivileged runs use
+`~/.local/state/fedora-crash-doctor/backtraces`; root uses
+`/var/log/fedora-crash-doctor/backtraces`.
+
+Application findings expose a `backtrace` object with state and, after capture,
+path and byte count. A report exported while the worker is running retains that
+snapshot; the completed text file records its final state. No GUI completion
+notification or automatic refresh of previously exported reports is provided.

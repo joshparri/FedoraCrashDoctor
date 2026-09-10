@@ -160,64 +160,16 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
             f"Signals observed: {', '.join(signals)}",
         ]
         
+        backtrace = {"state": "unavailable"}
         if last['status'] == 'present' and str(last['pid']).isdigit():
             import threading
-            import subprocess
-            import os
-            import select
-            
-            def run_gdb(pid_str: str, exe_path: str, ts_str: str):
-                env = os.environ.copy()
-                env["DEBUGINFOD_URLS"] = "https://debuginfod.fedoraproject.org/"
-                
-                cmd = [
-                    "coredumpctl", "gdb", pid_str,
-                    "--batch",
-                    "-ex", "set pagination off",
-                    "-ex", "thread apply all bt full",
-                    "-ex", "quit"
-                ]
-                
-                try:
-                    def set_limits():
-                        import resource
-                        resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
-                        resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
-                        resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
-                    
-                    proc = subprocess.Popen(
-                        cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, preexec_fn=set_limits
-                    )
-                    
-                    output = b""
-                    while True:
-                        ready, _, _ = select.select([proc.stdout], [], [], 60.0)
-                        if not ready:
-                            proc.kill()
-                            output += b"\n\n[TRUNCATED: GDB analysis timed out]"
-                            break
-                        chunk = proc.stdout.read(4096)
-                        if not chunk:
-                            break
-                        output += chunk
-                        if len(output) > 5 * 1024 * 1024:
-                            proc.kill()
-                            output += b"\n\n[TRUNCATED: Output exceeded 5MB limit]"
-                            break
-                    proc.wait(timeout=5)
-                    
-                    out_dir = "/var/log/fedora-crash-doctor/backtraces"
-                    os.makedirs(out_dir, exist_ok=True, mode=0o700)
-                    safe_exe = exe_path.split('/')[-1] if exe_path else 'unknown'
-                    out_path = os.path.join(out_dir, f"{pid_str}_{safe_exe}_{ts_str}.txt")
-                    with open(out_path, "wb") as f:
-                        f.write(output)
-                except Exception:
-                    if 'proc' in locals() and proc.poll() is None:
-                        proc.kill()
-
             ts_str = str(int(last['time'].timestamp())) if last['time'] else "0"
-            t = threading.Thread(target=run_gdb, args=(str(last['pid']), last['exe'], ts_str), daemon=True)
+            backtrace["state"] = "running"
+
+            def resolve(result=backtrace, pid=str(last["pid"]), exe=last["exe"], ts=ts_str):
+                result.update(generate_backtrace(pid, exe, ts))
+
+            t = threading.Thread(target=resolve, daemon=True)
             t.start()
             evidence.append("Symbolic backtrace resolution initiated in background.")
 
@@ -231,5 +183,113 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
             evidence,
             "Investigate application-specific logs, versions, or reinstall."
         ))
+        issues[-1]["backtrace"] = backtrace
         
     return issues
+
+
+def generate_backtrace(pid: str, executable: str, timestamp: str, *,
+                       output_dir=None,
+                       timeout=60.0, output_limit=10 * 1024 * 1024):
+    """Capture bounded debugger output; return a structured result to callers."""
+    import os
+    import selectors
+    import signal
+    import subprocess
+    import sys
+    import time
+    import stat
+    import uuid
+
+    if output_dir is None:
+        output_dir = ("/var/log/fedora-crash-doctor/backtraces" if os.geteuid() == 0 else
+                      os.path.join(os.path.expanduser("~/.local/state"),
+                                   "fedora-crash-doctor", "backtraces"))
+
+    if not pid.isdecimal() or not timestamp.isdecimal():
+        return {"state": "failed", "error": "Invalid incident identifier"}
+    proc = None
+    directory_fd = None
+    try:
+        # Walk with directory descriptors so no path component can be a symlink.
+        directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        components = os.path.abspath(output_dir).split("/")[1:]
+        for component in components:
+            try:
+                os.mkdir(component, 0o700, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                              dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        metadata = os.fstat(directory_fd)
+        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise PermissionError("Backtrace directory must be private and owned by the current user")
+        env = os.environ.copy()
+        env["DEBUGINFOD_URLS"] = "https://debuginfod.fedoraproject.org/"
+        debugger_args = '--batch -nx -iex "set auto-load off" -iex "set debuginfod enabled on" -ex "set pagination off" -ex "thread apply all bt full" -ex quit'
+        cmd = [sys.executable, os.path.abspath(__file__), "--backtrace-worker",
+               "coredumpctl", "debug", pid, f"COREDUMP_EXE={executable}",
+               f"--debugger-arguments={debugger_args}"]
+        deadline = time.monotonic() + timeout
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        output = bytearray()
+        state = "completed"
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    state = "timed_out"
+                    break
+                if not selector.select(remaining):
+                    state = "timed_out"
+                    break
+                chunk = os.read(proc.stdout.fileno(), min(65536, output_limit - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) >= output_limit:
+                    state = "truncated"
+                    break
+        if state == "completed":
+            try:
+                if proc.wait(timeout=max(0.001, deadline - time.monotonic())) != 0:
+                    state = "failed"
+            except subprocess.TimeoutExpired:
+                state = "timed_out"
+        name = f"{pid}_{timestamp}_{uuid.uuid4().hex}.txt"
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory_fd)
+        header = f"Backtrace state: {state}\n".encode()
+        payload = (header + output)[:output_limit]
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+        return {"state": state, "path": os.path.join(output_dir, name), "bytes": len(payload)}
+    except (OSError, ValueError) as exc:
+        return {"state": "failed", "error": str(exc)}
+    finally:
+        if proc is not None:
+            # Kill descendants as well, even when the immediate wrapper has exited.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            proc.stdout.close()
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+if __name__ == "__main__":
+    import os
+    import resource
+    import sys
+    if len(sys.argv) > 2 and sys.argv[1] == "--backtrace-worker":
+        # Resource setup runs in a fresh interpreter, never a threaded preexec_fn.
+        resource.setrlimit(resource.RLIMIT_AS, (1024 ** 3, 1024 ** 3))
+        resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 ** 2, 10 * 1024 ** 2))
+        os.execvp(sys.argv[2], sys.argv[2:])

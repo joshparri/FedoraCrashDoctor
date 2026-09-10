@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- Verified real systemd cores through the asynchronous analyser; enable debuginfod explicitly in batch mode, expose backtrace results, and use private user-state storage for unprivileged captures.
+- Fixed background backtrace debugger arguments, absolute timeout, process cleanup, and 10 MiB output bound. Resource limits now run in a separate interpreter; private output creation rejects symlinks and records completion status.
+- Derive the built RPM spec version from VERSION and include the application analysis runtime modules.
+
 ## 3.2.1 — 2026-08-27
 - Fixed autoscan boot boundary to correctly inspect only the immediately preceding boot.
 - Ensured dynamically generated storage (`storage_*`) and thermal (`thermal`) finding IDs contribute correctly to incident hypotheses.
