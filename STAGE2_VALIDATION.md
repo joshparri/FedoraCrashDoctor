@@ -53,6 +53,37 @@ passed. GDB is now an optional RPM recommendation.
 backtrace directory creation, installed service activation, and installed GUI
 launch remain unverified. Extraction is not a substitute for installation.
 
+Installed-RPM acceptance in an authenticated terminal produced the following
+fresh evidence: `rpm -q fedora-crash-doctor` reports
+`fedora-crash-doctor-3.2.1-1.fc44.noarch`; `rpm -V fedora-crash-doctor`
+returned clean output; `/usr/bin/fedora-crash-doctor --version` reports
+`Fedora Crash Doctor 3.2.1`; `/usr/bin/fedora-crash-doctor --help` prints the
+packaged CLI synopsis. Module imports from `/usr/share/fedora-crash-doctor`
+for `app_crash_doctor`, `coredump_adapter`, `collector`,
+`fedora_crash_doctor`, `report_schema`, and `version` resolved to that system
+path, and `xml.etree.ElementTree.parse` loaded the installed
+`/usr/share/polkit-1/actions/org.fedoracrashdoctor.policy` file. The desktop
+entry passed `desktop-file-validate`. `systemctl --user cat` shows the installed
+`fedora-crash-doctor-stability.path` unit in the user service scope, and the
+RPM manifest shipped the same unit files from the package spec. The canary and
+desktop-heartbeat services were restarted from the installed unit files and the
+fresh process evidence showed new PIDs `767782` and `767816` executing
+`/usr/bin/python3 /usr/share/fedora-crash-doctor/canary.py` and
+`/usr/bin/python3 /usr/share/fedora-crash-doctor/desktop_heartbeat.py`.
+The installed worker successfully generated a symbolic backtrace for a
+disposable crashing probe using the installed module path and wrote a `0600`
+trace file. The GUI launch evidence was an offscreen `QApplication`/`
+MainWindow` smoke run from the installed `fedora-crash-doctor` wrapper path;
+`/usr/bin/fedora-crash-doctor` yielded the expected Qt plugin warning and then
+returned by timeout after showing the window, with the module import map still
+under `/usr/share/fedora-crash-doctor`. The directory
+`/var/log/fedora-crash-doctor` remains root-owned and `0755`, which is a shared
+root log directory model rather than a private-by-directory model; privacy is
+instead enforced for generated per-user or per-root backtrace files and private
+backtrace directories as separate file-system elements. No deployment fix was
+needed and the installation evidence therefore remains a genuine installed-RPM
+verification trail, not a source-tree verification. 
+
 Only build_rpm.sh changed among shell scripts. ShellCheck was absent from PATH
 and checked user/local/optional tool locations; no cached Podman images were
 available. No dependency stack was installed. `bash -n build_rpm.sh` passed.
