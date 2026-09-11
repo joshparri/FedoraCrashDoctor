@@ -26,6 +26,7 @@ from typing import Any, Callable, Iterable
 
 from device_inventory import attribute_log_line, parse_lsblk_json
 from freeze_classifiers import classify_freeze_evidence
+from incident_model import attach_incident_identity
 from report_schema import REPORT_SCHEMA_VERSION, validate_report
 from telemetry_timeline import build_telemetry_timeline
 from version import app_version
@@ -1231,7 +1232,7 @@ def build_incidents(findings, checks):
 
         conf_exp = f"Ranked {best['confidence']} based on timing and severity." if best else "No evidence."
 
-        report_incidents.append({
+        report_incidents.append(attach_incident_identity({
             "boot_id": boot_id,
             "boot_index": inc["boot"],
             "incident_start": inc["start"].isoformat(),
@@ -1246,7 +1247,7 @@ def build_incidents(findings, checks):
             "confidence_explanation": conf_exp,
             "hypotheses": hypotheses,
             "sort_key": inc["end"].timestamp()
-        })
+        }))
 
     return report_incidents, boot_warnings, unresolved_evidence
 
