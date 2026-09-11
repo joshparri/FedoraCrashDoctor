@@ -1,55 +1,112 @@
-"""Structured Incident identity and classification.
+"""Structured Incident identity, failure-scope classification, and
+evidence-completeness accounting.
 
 collector.build_incidents() already groups evidence around boot boundaries
-and ranks explanatory hypotheses for each one -- that machinery is not
-duplicated here. What it doesn't yet provide is a stable identity for each
-incident (so the same incident computed on a rescan is recognisably "the
-same one", which recurrence/fingerprinting in a later pass will need) or an
-answer to "WHAT actually froze?" as one of a fixed set of incident classes,
-as opposed to only a ranked list of possible explanations.
+and ranks explanatory hypotheses per incident (title/category/score/
+confidence/supports/against/next_test) -- that ranking machinery is not
+duplicated here and is not touched by this module. This module answers two
+narrower questions cleanly, and keeps them separate:
+
+  WHAT stopped responding, and how much of the system was affected?
+    -> classify_failure_scope() / FAILURE_SCOPES
+
+  WHY did it probably happen?
+    -> collector.py's existing incident["hypotheses"], unchanged; this
+       module only adds mechanism_tags(), a coarse normalisation of those
+       existing hypotheses' categories for later fingerprinting, not a new
+       ranking.
+
+An earlier version of this module conflated the two into one
+"classification" enum (e.g. gpu_drm_i915_incident, memory_thrashing,
+plasmashell_panel_failure all as siblings), which meant a desktop freeze
+caused by i915 could only ever be labelled as the GPU incident itself,
+instead of "the desktop/compositor stopped responding (scope), most likely
+because of the GPU/DRM path (mechanism, ranked, not certain)". That is what
+FAILURE_SCOPES + mechanism_tags() replaces.
 
 attach_incident_identity() adds a small number of keys to an existing
-incident dict (incident_id, classification, classification_reasoning,
-evidence_sources, evidence_completeness) without removing or renaming any
-existing key, so every current consumer (report_schema, the GUI, existing
-tests) is unaffected.
+incident dict (incident_id, failure_scope, failure_scope_reasoning,
+mechanism_tags, evidence_sources, evidence_completeness) without removing
+or renaming any existing key, so every current consumer (report_schema,
+the GUI, existing tests) is unaffected.
 """
 from __future__ import annotations
 
 import hashlib
 from typing import Any
 
-# What actually froze -- a fixed, closed set of incident classes. An
+# WHAT stopped responding / how much of the system was affected. An
 # incident is classified into exactly one of these, falling back to
-# 'insufficient_evidence' rather than guessing when the available evidence
-# does not clearly support a more specific class. Never add a class here
-# that this module cannot actually justify from real evidence.
-INCIDENT_CLASSES = (
-    "application_only_crash",
-    "plasmashell_panel_failure",
-    "kwin_compositor_hang",
-    "gpu_drm_i915_incident",
-    "system_alive_desktop_dead",
-    "memory_thrashing",
-    "oom_kill_contained",
-    "storage_filesystem_blocking",
-    "kernel_hard_lockup",
-    "hardware_ras_incident",
-    "abrupt_power_loss",
-    "clean_reboot_shutdown",
-    "insufficient_evidence",
+# 'unknown' rather than guessing when the available evidence does not
+# clearly support a more specific scope. Never add a value here that this
+# module cannot actually justify from real evidence.
+FAILURE_SCOPES = (
+    "application",
+    "plasmashell_panel",
+    "compositor_session",
+    "desktop_environment",
+    "whole_system",
+    "clean_shutdown",
+    "unknown",
 )
 
+# Coarse, stable tags for collector.py's existing hypothesis categories,
+# used only for later fingerprinting/family-matching (Section 8). This is a
+# normalisation of hypotheses collector.py already ranked -- it never
+# generates a hypothesis of its own.
+MECHANISM_TAGS = (
+    "memory_pressure",
+    "thermal",
+    "gpu_drm",
+    "storage_filesystem",
+    "hardware_ras",
+    "unknown_kernel_firmware_power",
+    "application_fault",
+    "unknown",
+)
+
+_CATEGORY_TO_MECHANISM = {
+    "Memory": "memory_pressure",
+    "Thermals": "thermal",
+    "Graphics": "gpu_drm",
+    "Storage": "storage_filesystem",
+    "PCIe / Network": "hardware_ras",
+    # collector.py's single Firmware-category hypothesis is explicitly
+    # titled "Unknown Kernel, Firmware or Power Failure" -- it does not
+    # itself distinguish a kernel lockup from a power-loss event, so this
+    # tag doesn't invent that distinction either.
+    "Firmware": "unknown_kernel_firmware_power",
+    "Software": "application_fault",
+}
+
+# Explicit states for "how much evidence do we actually have here", so a
+# False/missing value is never read as "checked and healthy". See
+# evidence_completeness().
+EVIDENCE_STATES = ("complete", "partial", "not_collected", "unavailable", "failed", "truncated")
+
 _GRAPHICS_SYMPTOM_IDS = {"intel_display", "other_gpu"}
-_STORAGE_SYMPTOM_PREFIX = "storage_"
-_THERMAL_SYMPTOM_PREFIX = "thermal"
 
 
-def compute_incident_id(boot_id: str, incident_start: str, failure_boundary: str) -> str:
-    """A stable identifier derived from the incident's own content, not
-    randomness or wall-clock time, so recomputing the same incident (e.g. on
-    a rescan) yields the same id instead of a fresh one each time."""
-    digest = hashlib.sha256(f"{boot_id}|{incident_start}|{failure_boundary}".encode()).hexdigest()
+def compute_incident_id(boot_id: str, anchor_ts: str) -> str:
+    """Stable identifier derived ONLY from the incident's boot and its
+    anchor timestamp -- the raw boundary-event timestamp collector.py
+    detected, before the +/- window padding around it. Deliberately does
+    NOT depend on failure_boundary, failure_scope, confidence, or any
+    attached evidence, since later sections can revise all of those for
+    the same real-world incident without it becoming "a new incident".
+
+    This is a best-effort stable anchor, not a cryptographic guarantee: if
+    a future evidence source retroactively determines the true anchor
+    event happened at a materially different timestamp than today's
+    boundary detection found, the id will still change -- there is
+    currently no more stable anchor available than the detected boundary
+    event itself. Section 8's fingerprint/family matching (evidence-pattern
+    based, not raw id equality) is the intended way to recognise "probably
+    the same recurring problem" across that rarer kind of change; this id
+    is only for recognising the same computed incident across a rescan or
+    across additive evidence being joined onto it.
+    """
+    digest = hashlib.sha256(f"{boot_id}|{anchor_ts}".encode()).hexdigest()
     return f"inc_{digest[:16]}"
 
 
@@ -70,79 +127,117 @@ def _coredump_executables(incident: dict[str, Any]) -> set[str]:
     return names
 
 
-def classify_incident(incident: dict[str, Any]) -> tuple[str, list[str]]:
-    """Classify one incident dict (as produced by collector.build_incidents)
-    into an INCIDENT_CLASSES value, with the reasoning that led there.
+def classify_failure_scope(incident: dict[str, Any]) -> tuple[str, list[str]]:
+    """Classify one incident dict onto a FAILURE_SCOPES value -- WHAT
+    stopped responding, not why. Uses only evidence already on the
+    incident dict. Never manufactures certainty: ambiguous or absent
+    evidence produces 'unknown' rather than a guess.
 
-    This only uses evidence already present on the incident dict (failure
-    boundary, evidence findings, coredumps). It does not have access to
-    canary/heartbeat telemetry or user observations yet -- a future pass
-    that joins those in can sharpen classes like system_alive_desktop_dead
-    that cannot be confidently distinguished from the evidence available
-    today. Never manufactures certainty: ambiguous or absent evidence
-    produces 'insufficient_evidence' rather than a guess.
+    failure_scope='whole_system' is used for every boundary type that
+    itself means the machine stopped (kernel panic, watchdog lockup,
+    unclean shutdown) regardless of which symptom evidence happens to
+    co-occur in the same window -- a graphics-symptom-adjacent unclean
+    shutdown is scope=whole_system with a leading gpu_drm mechanism tag,
+    not its own separate "GPU incident" scope, because the GPU evidence
+    does not establish that only the desktop/GPU stack was affected.
+
+    desktop_environment is declared in FAILURE_SCOPES but not reachable
+    today: distinguishing "the whole desktop environment stopped
+    responding" from "the compositor process specifically crashed" needs
+    desktop-heartbeat telemetry this module does not have access to yet.
     """
     boundary = incident.get("failure_boundary")
     symptoms = _symptom_ids(incident)
     coredump_exes = _coredump_executables(incident)
 
-    if boundary == "kernel panic":
-        return "kernel_hard_lockup", ["Boot boundary was a logged kernel panic."]
-    if boundary == "watchdog lockup":
-        return "kernel_hard_lockup", ["Boot boundary was a hardware/software watchdog-triggered lockup."]
-    if boundary == "compositor crash":
-        return "kwin_compositor_hang", ["Boot boundary was a Wayland/KWin compositor crash."]
+    if boundary in {"kernel panic", "watchdog lockup", "unclean shutdown"}:
+        return "whole_system", [f"Boot boundary '{boundary}' means the machine stopped responding entirely."]
     if boundary == "clean shutdown":
-        return "clean_reboot_shutdown", ["Boot boundary was a clean, orderly shutdown/reboot sequence."]
+        return "clean_shutdown", ["Boot boundary was a clean, orderly shutdown/reboot sequence."]
+    if boundary == "compositor crash":
+        return "compositor_session", ["Boot boundary was a Wayland/KWin compositor crash; the system boot itself continued."]
     if boundary == "OOM event":
-        return "oom_kill_contained", [
-            "An OOM kill was logged, and the boot boundary itself was not an unclean shutdown, "
-            "so the kernel's OOM killer appears to have contained the pressure rather than the "
-            "whole system going down."
+        # An OOM-kill boundary that is NOT also an unclean-shutdown boundary
+        # means the kernel's OOM killer acted and the boot continued -- but
+        # that alone does not tell us whether only one process, the whole
+        # desktop, or nothing user-visible was affected.
+        return "unknown", [
+            "An OOM kill was logged and the boot continued, but no further evidence establishes "
+            "how much of the system (if anything user-visible) was actually affected."
         ]
 
     if "plasmashell" in coredump_exes:
-        return "plasmashell_panel_failure", ["A coredump for plasmashell was recorded in this window."]
+        return "plasmashell_panel", ["A coredump for plasmashell was recorded in this window."]
     if coredump_exes and not symptoms:
-        return "application_only_crash", [
+        return "application", [
             f"Coredump(s) recorded for {', '.join(sorted(coredump_exes))} with no other "
             "system-level symptom evidence in this window."
         ]
+    if "wayland" in symptoms or (symptoms & _GRAPHICS_SYMPTOM_IDS):
+        return "compositor_session", ["Compositor/graphics error evidence was recorded in this window."]
 
-    if symptoms & _GRAPHICS_SYMPTOM_IDS:
-        return "gpu_drm_i915_incident", ["Intel display/DRM or other GPU error evidence was recorded in this window."]
-    if "wayland" in symptoms:
-        return "kwin_compositor_hang", ["Wayland/KWin compositor error evidence was recorded in this window."]
-    if any(s.startswith(_STORAGE_SYMPTOM_PREFIX) for s in symptoms):
-        return "storage_filesystem_blocking", ["Storage/filesystem error evidence was recorded in this window."]
-    if "oom" in symptoms:
-        return "memory_thrashing", ["Memory/OOM-pressure evidence was recorded in this incident window."]
-    if any(s.startswith(_THERMAL_SYMPTOM_PREFIX) for s in symptoms) or "repeated_pcie_device" in symptoms:
-        return "hardware_ras_incident", ["Thermal or PCIe hardware-error evidence was recorded in this window."]
-
-    if boundary == "unclean shutdown":
-        return "insufficient_evidence", [
-            "The boot ended uncleanly (an abrupt whole-machine stop is confirmed), but no "
-            "corroborating symptom evidence (memory, graphics, storage, thermal) was found to "
-            "identify a specific mechanism, so the cause -- including power loss -- is not "
-            "established, only the fact that the machine stopped abruptly."
-        ]
-
-    return "insufficient_evidence", ["No evidence pattern in this window matched a known incident class."]
+    return "unknown", ["No evidence pattern in this window established a specific failure scope."]
 
 
-def attach_incident_identity(incident: dict[str, Any]) -> dict[str, Any]:
-    """Mutate `incident` in place, adding incident_id/classification/
-    classification_reasoning/evidence_sources/evidence_completeness, and
-    also return it for convenient chaining."""
+def mechanism_tags(incident: dict[str, Any]) -> list[str]:
+    """Normalise collector.py's existing ranked hypotheses (by category)
+    into coarse, stable tags, in the same rank order as
+    incident['hypotheses']. This reuses that existing ranking; it does not
+    add, remove, re-score, or re-order any hypothesis."""
+    tags = []
+    for h in incident.get("hypotheses", []) or []:
+        tags.append(_CATEGORY_TO_MECHANISM.get(h.get("category"), "unknown"))
+    return tags
+
+
+def evidence_completeness(incident: dict[str, Any], checks: dict[str, Any] | None) -> dict[str, str]:
+    """Per-source evidence state, using EVIDENCE_STATES rather than a bare
+    boolean, so "no data" is never conflated with "checked and healthy".
+
+    journal/coredump reflect this module's only two current evidence
+    inputs. canary_telemetry/desktop_heartbeat/user_observations are always
+    'not_collected' today: build_incidents() does not yet receive canary
+    samples, desktop-heartbeat samples, or user-reported observations to
+    join onto an incident at all (later mission sections). That is recorded
+    explicitly rather than left to read as "healthy".
+    """
+    checks = checks or {}
+
+    if not checks:
+        journal_state = "not_collected"
+    elif incident.get("incident_evidence"):
+        journal_state = "complete"
+    else:
+        journal_state = "unavailable"
+
+    if "coredumps_json" not in checks:
+        coredump_state = "not_collected"
+    elif incident.get("coredumps"):
+        coredump_state = "complete"
+    else:
+        coredump_state = "unavailable"
+
+    return {
+        "journal": journal_state,
+        "coredump": coredump_state,
+        "canary_telemetry": "not_collected",
+        "desktop_heartbeat": "not_collected",
+        "user_observations": "not_collected",
+    }
+
+
+def attach_incident_identity(incident: dict[str, Any], checks: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Mutate `incident` in place, adding incident_id/failure_scope/
+    failure_scope_reasoning/mechanism_tags/evidence_sources/
+    evidence_completeness, and also return it for convenient chaining."""
     incident["incident_id"] = compute_incident_id(
         incident.get("boot_id", "unknown"),
-        incident.get("incident_start", ""),
-        incident.get("failure_boundary", ""),
+        incident.get("incident_anchor_ts", incident.get("incident_start", "")),
     )
-    incident_class, reasoning = classify_incident(incident)
-    incident["classification"] = incident_class
-    incident["classification_reasoning"] = reasoning
+    scope, reasoning = classify_failure_scope(incident)
+    incident["failure_scope"] = scope
+    incident["failure_scope_reasoning"] = reasoning
+    incident["mechanism_tags"] = mechanism_tags(incident)
 
     sources = []
     if incident.get("incident_evidence"):
@@ -150,14 +245,5 @@ def attach_incident_identity(incident: dict[str, Any]) -> dict[str, Any]:
     if incident.get("coredumps"):
         sources.append("coredump")
     incident["evidence_sources"] = sources
-    # Canary/heartbeat telemetry and user-reported observations are not
-    # joined into incidents yet (later mission sections); recorded as an
-    # explicit gap rather than silently treating their absence as "healthy".
-    incident["evidence_completeness"] = {
-        "journal": "journal" in sources,
-        "coredump": "coredump" in sources,
-        "canary_telemetry": False,
-        "desktop_heartbeat": False,
-        "user_observations": False,
-    }
+    incident["evidence_completeness"] = evidence_completeness(incident, checks)
     return incident

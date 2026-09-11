@@ -1047,6 +1047,12 @@ def build_incidents(findings, checks):
                 "boot": bd["boot"],
                 "start": w_start,
                 "end": w_end,
+                # The boundary event's own timestamp, before the +/- window
+                # padding above -- used as a stable incident identity anchor
+                # (see incident_model.compute_incident_id) since the padded
+                # window can be widened by later evidence without the
+                # underlying anchor event changing.
+                "anchor_ts": bd["ts"],
                 "boundary": bd["type"],
                 "events": [],
                 "symptoms": {}
@@ -1237,6 +1243,7 @@ def build_incidents(findings, checks):
             "boot_index": inc["boot"],
             "incident_start": inc["start"].isoformat(),
             "incident_end": inc["end"].isoformat(),
+            "incident_anchor_ts": inc["anchor_ts"].isoformat(),
             "failure_boundary": inc["boundary"],
             "incident_evidence": [e for e in inc["events"] if e["timestamp"]],
             "coredumps": incident_coredumps,
@@ -1247,7 +1254,7 @@ def build_incidents(findings, checks):
             "confidence_explanation": conf_exp,
             "hypotheses": hypotheses,
             "sort_key": inc["end"].timestamp()
-        }))
+        }, checks))
 
     return report_incidents, boot_warnings, unresolved_evidence
 
