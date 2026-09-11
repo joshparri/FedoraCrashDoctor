@@ -1795,6 +1795,7 @@ def cli_main(argv: list[str]) -> int:
             "Examples:\n"
             "  python3 fedora_crash_doctor.py --cli --scan --mode quick --output scan.json\n"
             "  python3 fedora_crash_doctor.py --cli --scan --mode deep --output deep-scan.json\n"
+            "  python3 fedora_crash_doctor.py --record-observation inc_0123456789abcdef\n"
             "  python3 fedora_crash_doctor.py --version"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1805,10 +1806,17 @@ def cli_main(argv: list[str]) -> int:
     parser.add_argument("--mode", choices=["quick", "full", "deep"], default="quick", help="scan depth; deep includes expensive maintenance checks")
     parser.add_argument("--output", help="write scan JSON to this path")
     parser.add_argument("--baseline", help="optional previous scan JSON used to mark recurring findings")
+    parser.add_argument("--record-observation", metavar="INCIDENT_ID",
+                         help="interactively record what you observed for an incident (a scan's report.json "
+                              "lists each incident's incident_id)")
     args = parser.parse_args(argv)
 
     if args.version:
         print(f"Fedora Crash Doctor {VERSION}")
+        return 0
+    if args.record_observation:
+        from incident_observations import run_observation_cli
+        run_observation_cli(args.record_observation)
         return 0
     if not args.cli:
         parser.error("unknown GUI arguments; run with no arguments to launch the GUI, or use --cli for terminal mode")
