@@ -3,7 +3,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>Fedora Crash Doctor</vendor>
-  <vendor_url>https://localhost.invalid/fedora-crash-doctor</vendor_url>
+  <vendor_url>https://github.com/joshparri/FedoraCrashDoctor</vendor_url>
   <icon_name>utilities-system-monitor</icon_name>
 
   <action id="org.fedoracrashdoctor.helper">

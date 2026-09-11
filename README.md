@@ -1,4 +1,4 @@
-# Fedora Crash Doctor 3.2.0
+# Fedora Crash Doctor
 
 A local Qt 6 diagnostic application for Fedora KDE and other Fedora desktops.
 It is designed to answer three questions after a crash:

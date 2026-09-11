@@ -3,7 +3,7 @@ Version:        3.2.1
 Release:        1%{?dist}
 Summary:        Evidence-weighted crash diagnostics for Fedora
 License:        MIT
-URL:            https://localhost.invalid/fedora-crash-doctor
+URL:            https://github.com/joshparri/FedoraCrashDoctor
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
@@ -11,7 +11,7 @@ Requires:       python3
 Requires:       python3-pyside6
 Requires:       polkit
 Requires:       systemd
-Requires:       libnotify
+Requires:       /usr/bin/notify-send
 Recommends:     gdb
 Recommends:     inxi
 Recommends:     smartmontools
@@ -46,7 +46,7 @@ KWin heartbeats, controlled tests, and a locked-down PolicyKit helper.
 install -d %{buildroot}%{_datadir}/fedora-crash-doctor
 install -m 0755 fedora_crash_doctor.py collector.py canary.py desktop_heartbeat.py chrome_capture.py plasma_capture.py autoscan.py host_stability_audit.py %{buildroot}%{_datadir}/fedora-crash-doctor/
 install -m 0755 device_inventory.py freeze_classifiers.py report_schema.py safe_mitigation.py telemetry_timeline.py version.py %{buildroot}%{_datadir}/fedora-crash-doctor/
-install -m 0644 app_crash_doctor.py coredump_adapter.py graphics_doctor.py hardware_doctor.py memory_oom.py dadlan_doctor.py %{buildroot}%{_datadir}/fedora-crash-doctor/
+install -m 0644 app_crash_doctor.py symbolic_analysis.py coredump_adapter.py graphics_doctor.py hardware_doctor.py memory_oom.py dadlan_doctor.py %{buildroot}%{_datadir}/fedora-crash-doctor/
 install -m 0644 VERSION README.md LICENSE CHANGELOG.md HISTORY.md TODO.md %{buildroot}%{_datadir}/fedora-crash-doctor/
 
 install -d %{buildroot}%{_libexecdir}/fedora-crash-doctor
@@ -80,6 +80,10 @@ systemctl --global enable fedora-crash-doctor-stability.path >/dev/null 2>&1 || 
 
 %preun
 %systemd_preun fedora-crash-doctor-canary.service fedora-crash-doctor-autoscan.service
+if [ $1 -eq 0 ] ; then
+  systemctl --global disable fedora-crash-doctor-desktop-heartbeat.service >/dev/null 2>&1 || :
+  systemctl --global disable fedora-crash-doctor-stability.path >/dev/null 2>&1 || :
+fi
 
 %postun
 %systemd_postun_with_restart fedora-crash-doctor-canary.service fedora-crash-doctor-autoscan.service
@@ -99,6 +103,9 @@ systemctl --global enable fedora-crash-doctor-stability.path >/dev/null 2>&1 || 
 %{_datadir}/applications/fedora-crash-doctor.desktop
 
 %changelog
+* Fri Sep 11 2026 Fedora Crash Doctor contributors <noreply@example.invalid> - 3.2.1-1
+- Bounded GDB/debuginfod symbolic backtraces; structured coredump ingestion hardening
+
 * Wed Aug 26 2026 Fedora Crash Doctor contributors <noreply@example.invalid> - 3.2.0-1
 - Add host stability audit, explicit CLI, report schema checks and deep scan mode
 

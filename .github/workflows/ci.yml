@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+# Fedora Crash Doctor targets Fedora specifically (PolicyKit, systemd unit
+# shapes, dnf/rpm tooling, coredumpctl output formats). Running these checks
+# on an Ubuntu runner would validate a different OS than the one this ships
+# on, so every job runs inside an actual Fedora container image.
+jobs:
+  test:
+    name: Python tests + packaging checks (Fedora)
+    runs-on: ubuntu-latest
+    container: fedora:41
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Install OS packages
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git python3 python3-pip python3-pyside6 polkit systemd libnotify \
+            desktop-file-utils rpm-build rpmdevtools rpmlint ShellCheck \
+            gdb coredumpctl
+      - uses: actions/checkout@v4
+      - name: Install Python test dependencies
+        run: python3 -m pip install --user pytest
+      - name: pytest (unittest + pytest-style tests, both discovered)
+        run: python3 -m pytest -q tests/
+      - name: Python compile check
+        run: python3 -m py_compile ./*.py
+      - name: Shell syntax
+        run: |
+          for script in ./*.sh; do bash -n "$script"; done
+      - name: shellcheck
+        run: shellcheck ./*.sh
+      - name: PolicyKit policy XML
+        run: python3 -c "import xml.etree.ElementTree as ET; ET.parse('polkit/org.fedoracrashdoctor.policy')"
+      - name: desktop-file-validate
+        run: desktop-file-validate packaging/fedora-crash-doctor.desktop
+      - name: systemd-analyze verify (services + path unit)
+        run: systemd-analyze verify systemd/*.service systemd/*.path
+      - name: report.schema.json is valid JSON
+        run: python3 -c "import json; json.load(open('schema/report.schema.json'))"
+      - name: Build RPM
+        run: ./build_rpm.sh
+      - name: rpmlint
+        run: rpmlint "$HOME"/rpmbuild/RPMS/noarch/fedora-crash-doctor-*.rpm
+      - name: git diff --check (whitespace hygiene)
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git diff --check

@@ -32,6 +32,13 @@ install -m 0755 "$SOURCE_DIR/telemetry_timeline.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/version.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/chrome_capture.py" "$SHARE_DIR/"
 install -m 0755 "$SOURCE_DIR/plasma_capture.py" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/app_crash_doctor.py" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/symbolic_analysis.py" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/coredump_adapter.py" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/graphics_doctor.py" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/hardware_doctor.py" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/memory_oom.py" "$SHARE_DIR/"
+install -m 0644 "$SOURCE_DIR/dadlan_doctor.py" "$SHARE_DIR/"
 install -m 0644 "$SOURCE_DIR/VERSION" "$SHARE_DIR/"
 install -m 0644 "$SOURCE_DIR/README.md" "$SHARE_DIR/"
 install -m 0644 "$SOURCE_DIR/HISTORY.md" "$SHARE_DIR/" 2>/dev/null || true
@@ -63,6 +70,6 @@ restorecon -RF "$SHARE_DIR" "$LIBEXEC_DIR" /usr/share/polkit-1/actions/org.fedor
 rm -rf /opt/fedora-crash-doctor
 
 echo
-echo "Fedora Crash Doctor 3.2.0 installed."
+echo "Fedora Crash Doctor $(cat "$SOURCE_DIR/VERSION") installed."
 echo "Open the application launcher and search for Fedora Crash Doctor."
 echo "The first privileged action asks once; the locked-down helper remains attached until the app closes."

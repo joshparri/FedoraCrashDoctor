@@ -5,9 +5,9 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-required=(python3-pyside6 polkit)
+required=(python3-pyside6 polkit systemd libnotify)
 recommended=(
-  inxi smartmontools nvme-cli lm_sensors pciutils usbutils fwupd
+  gdb inxi smartmontools nvme-cli lm_sensors pciutils usbutils fwupd
   rasdaemon edac-utils fwts kexec-tools btrfs-progs stress-ng memtest86+
   iw ksystemlog gnome-disk-utility abrt abrt-cli gnome-abrt
 )

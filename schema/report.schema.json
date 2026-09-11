@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://localhost.invalid/fedora-crash-doctor/report.schema.json",
+  "$id": "https://raw.githubusercontent.com/joshparri/FedoraCrashDoctor/main/schema/report.schema.json",
   "title": "Fedora Crash Doctor Report",
   "type": "object",
   "required": [

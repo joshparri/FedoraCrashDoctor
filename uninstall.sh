@@ -7,9 +7,13 @@ fi
 systemctl disable --now fedora-crash-doctor-canary.service 2>/dev/null || true
 systemctl disable fedora-crash-doctor-autoscan.service 2>/dev/null || true
 systemctl --global disable fedora-crash-doctor-desktop-heartbeat.service 2>/dev/null || true
+systemctl --global disable fedora-crash-doctor-stability.path 2>/dev/null || true
+systemctl --global disable fedora-crash-doctor-stability.service 2>/dev/null || true
 rm -f /usr/lib/systemd/system/fedora-crash-doctor-canary.service
 rm -f /usr/lib/systemd/system/fedora-crash-doctor-autoscan.service
 rm -f /usr/lib/systemd/user/fedora-crash-doctor-desktop-heartbeat.service
+rm -f /usr/lib/systemd/user/fedora-crash-doctor-stability.service
+rm -f /usr/lib/systemd/user/fedora-crash-doctor-stability.path
 rm -f /usr/share/polkit-1/actions/org.fedoracrashdoctor.policy
 rm -f /usr/share/applications/fedora-crash-doctor.desktop
 rm -f /usr/local/bin/fedora-crash-doctor
