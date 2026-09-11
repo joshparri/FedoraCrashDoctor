@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from confidence_explanation import explain_incident
 from device_inventory import attribute_log_line, parse_lsblk_json
 from freeze_classifiers import classify_freeze_evidence
 from incident_model import attach_incident_identity
@@ -879,21 +880,6 @@ def analyse_canary(checks: dict[str, Any]) -> dict[str, Any]:
     else:
         result["interpretation"] = "The latest system and desktop heartbeat samples remained aligned."
     return result
-    stale = [
-        row for row in rows[-20:]
-        if (row.get("desktop_heartbeat_age_s") or 0) > 20 or row.get("kwin_ok") is False
-    ]
-    if stale:
-        result["interpretation"] = (
-            "The system canary continued while the desktop/KWin heartbeat became stale or failed. "
-            "That pattern supports a compositor/session-level freeze more than immediate total power loss."
-        )
-    else:
-        result["interpretation"] = (
-            "The latest system and desktop heartbeat samples remained aligned. If both stop together at a future crash, "
-            "that supports a kernel, firmware, power or total-system lock rather than only KWin."
-        )
-    return result
 
 
 def confidence_label(score: float) -> str:
@@ -1638,6 +1624,13 @@ def collect(
     telemetry_timeline = build_telemetry_timeline(canary.get("samples", []))
     incidents, boot_warnings, unresolved = build_incidents(findings, checks)
     overall, hypotheses = build_overall(incidents, boot_warnings)
+    for incident in incidents:
+        # Explainable confidence for every hypothesis this incident already
+        # has, not a competing analysis -- no recurrence context here since
+        # collect() only sees this one scan's incidents; a caller with
+        # access to saved scan history (see incident_history.py) can
+        # re-explain with a family attached once that history exists.
+        incident["hypothesis_explanations"] = explain_incident(incident)
 
     baseline = load_baseline(baseline_path)
     now = metadata["generated"]

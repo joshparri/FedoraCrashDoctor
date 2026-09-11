@@ -52,3 +52,48 @@ def test_collector_includes_normalized_coredumps_in_report(monkeypatch):
     assert core["executable"] == "/usr/bin/kwin_wayland"
     assert core["signal"] == 11
     assert core["boot_id"] == "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+
+
+def test_collect_attaches_explainable_confidence_to_every_incident(monkeypatch):
+    """collect() must actually call confidence_explanation.explain_incident()
+    for the real pipeline, not just leave it as a tested-but-unused library --
+    this is a regression test for that wiring, independent of any GUI code."""
+    class MockRunner:
+        def __init__(self, *args, **kwargs):
+            self.cancelled = False
+
+        def execute(self):
+            return {
+                "previous_errors": {
+                    "title": "prev", "category": "Software", "status": "ok",
+                    "returncode": 0, "duration_seconds": 0, "command": "test",
+                    "output": "2026-07-29T12:26:00+1000 host kernel: i915 0000:00:02.0: [drm] *ERROR* Atomic update failure on pipe A",
+                },
+                "boot_history": {
+                    "title": "boot", "category": "Software", "status": "ok",
+                    "returncode": 0, "duration_seconds": 0, "command": "test",
+                    "output": "reboot   system boot  7.1.5-200.fc44.x Wed Jul 29 12:26 - crash  (03:25)",
+                },
+                "journal_boots": {
+                    "title": "boots", "category": "Software", "status": "ok",
+                    "returncode": 0, "duration_seconds": 0, "command": "test",
+                    "output": "-1 e2110b7c6f7e4e72afca6dfe736dbfb8 Wed 2026-07-29 12:26:00 AEST Wed 2026-07-29 12:26:00 AEST",
+                },
+            }
+
+    monkeypatch.setattr("collector.CheckRunner", MockRunner)
+    monkeypatch.setattr("coredump_adapter.get_systemd_coredumps", lambda *a, **k: [])
+    monkeypatch.setattr("collector.validate_report", lambda x: None)
+
+    report = collector.collect("quick")
+    incidents = report.get("incidents", [])
+    assert len(incidents) >= 1
+
+    incident = incidents[0]
+    assert "hypothesis_explanations" in incident
+    explanations = incident["hypothesis_explanations"]
+    assert len(explanations) == len(incident.get("hypotheses", []))
+    if explanations:
+        assert "mechanism" in explanations[0]
+        assert "missing_evidence" in explanations[0]
+        assert explanations[0]["recurrence_context"] is None  # single-scan collect() has no history

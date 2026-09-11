@@ -1406,12 +1406,38 @@ class MainWindow(QMainWindow):
             self.set_status("Scan cancelled." if str(data) == "Cancelled." else "Scan did not complete.")
             return
         self.report = data
+        self._attach_incident_recurrence(self.report)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         path = self.report_dir / f"scan-{stamp}.json"
         path.write_text(json.dumps(self.report, indent=2, ensure_ascii=False))
         self.load_report()
         self.set_status(f"Scan complete and saved to {path}")
         self.refresh_capture_status(silent=True)
+
+    def _attach_incident_recurrence(self, report: dict[str, Any]) -> None:
+        """Enrich this scan's incidents with cross-scan recurrence context,
+        using previously saved reports under self.report_dir.
+        collector.collect() already attached family-less hypothesis
+        explanations (it only ever sees one scan's incidents); this
+        upgrades them with real recurrence data once history exists, and
+        runs entirely in this unprivileged process -- privileged_helper.py
+        is not involved and is not changed by this."""
+        incidents = report.get("incidents") or []
+        if not incidents:
+            return
+        try:
+            from incident_history import families_from_history, family_for_incident
+            from confidence_explanation import explain_incident
+
+            exclude_generated = report.get("metadata", {}).get("generated")
+            families = families_from_history(self.report_dir, incidents, exclude_generated=exclude_generated)
+            for incident in incidents:
+                family = family_for_incident(families, incident)
+                if family is not None:
+                    incident["hypothesis_explanations"] = explain_incident(incident, family=family)
+            report["incident_families"] = [f.to_dict() for f in families if f.count > 1]
+        except Exception as exc:
+            self.set_status(f"Recurrence tracking unavailable this scan: {exc}")
 
     def load_report(self) -> None:
         if not self.report: return
