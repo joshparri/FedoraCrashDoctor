@@ -1,9 +1,48 @@
+import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 import hashlib
 import json
 from coredump_adapter import parse_systemd_coredump_json
+
+# Default minimum unique-incident count before a recurring-crash issue is
+# raised for an application. Fedora Crash Doctor is a generic diagnostic
+# product and ships with no application-specific defaults; a user or site
+# that wants a particular executable reported more eagerly (e.g. a
+# known-fragile in-house tool) can lower its threshold via an optional,
+# genuinely external config file -- see load_min_incident_overrides().
+DEFAULT_MIN_INCIDENTS = 3
+
+
+def app_crash_profile_path() -> Path:
+    xdg_config = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(xdg_config) / "fedora-crash-doctor" / "app_crash_profiles.json"
+
+
+def load_min_incident_overrides(path: Path | None = None) -> dict[str, int]:
+    """Load optional per-executable minimum-incident-count overrides from a
+    user/site-editable JSON config file (default: app_crash_profile_path()).
+    Format: {"executables": {"some-app": {"min_incidents": 1}}}.
+
+    There is no built-in list of "special" applications: an executable is
+    only reported below DEFAULT_MIN_INCIDENTS if this file says so. A
+    missing or malformed file is treated as "no overrides" rather than an
+    error, since a bad config file must never stop crash analysis from
+    running.
+    """
+    path = path or app_crash_profile_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    overrides: dict[str, int] = {}
+    for name, profile in (data.get("executables") or {}).items():
+        if isinstance(profile, dict) and isinstance(profile.get("min_incidents"), int):
+            overrides[name.lower()] = profile["min_incidents"]
+    return overrides
+
 
 def parse_coredumpctl_line(line: str) -> dict[str, Any] | None:
     match = re.match(r"^\w{3}\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+\w+\s+(\d+)\s+\d+\s+\d+\s+(\w+)\s+(\w+)\s+(\S+)\s+(.+)$", line.strip())
@@ -132,12 +171,14 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
         }
 
     now = datetime.now()
-    
+    min_incident_overrides = load_min_incident_overrides()
+
     for app_name, evs in by_app.items():
         evs.sort(key=lambda x: x["time"].timestamp() if x["time"] else 0)
         total_count = len(evs)
-        
-        if total_count < 3 and "antigravity" not in app_name.lower():
+
+        min_incidents = min_incident_overrides.get(app_name.lower(), DEFAULT_MIN_INCIDENTS)
+        if total_count < min_incidents:
             continue
             
         first_seen = evs[0]["time"]
@@ -160,18 +201,17 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
             f"Signals observed: {', '.join(signals)}",
         ]
         
+        # analyze_app_crashes() is a pure log-parsing function: it must never
+        # itself launch GDB or touch the network. Symbolic analysis is a
+        # separate, explicit action (see symbolic_analysis.start_symbolic_analysis)
+        # -- here we only record enough identity for a caller to request it.
         backtrace = {"state": "unavailable"}
         if last['status'] == 'present' and str(last['pid']).isdigit():
-            import threading
             ts_str = str(int(last['time'].timestamp())) if last['time'] else "0"
-            backtrace["state"] = "running"
-
-            def resolve(result=backtrace, pid=str(last["pid"]), exe=last["exe"], ts=ts_str):
-                result.update(generate_backtrace(pid, exe, ts))
-
-            t = threading.Thread(target=resolve, daemon=True)
-            t.start()
-            evidence.append("Symbolic backtrace resolution initiated in background.")
+            backtrace = {
+                "state": "not_requested",
+                "request": {"pid": str(last["pid"]), "executable": last["exe"], "timestamp": ts_str},
+            }
 
         if len(paths) > 1:
             evidence.append(f"Executable path changed across history: {', '.join(paths)}")
@@ -190,8 +230,29 @@ def analyze_app_crashes(lines: list[str]) -> list[dict[str, Any]]:
 
 def generate_backtrace(pid: str, executable: str, timestamp: str, *,
                        output_dir=None,
-                       timeout=60.0, output_limit=10 * 1024 * 1024):
-    """Capture bounded debugger output; return a structured result to callers."""
+                       timeout=60.0, output_limit=10 * 1024 * 1024,
+                       cancel_event=None, allow_network=False):
+    """Capture bounded debugger output; return a structured result to callers.
+
+    This is a low-level, blocking worker that launches GDB via coredumpctl.
+    Callers must never invoke this as a side effect of parsing/scanning --
+    use symbolic_analysis.start_symbolic_analysis() instead, which makes
+    that an explicit, bounded, cancellable, deduplicated job.
+
+    allow_network defaults to False: symbolication then uses only debug
+    info already present on this machine, and debuginfod is explicitly
+    disabled -- any DEBUGINFOD_URLS inherited from the caller's environment
+    is stripped so ambient configuration cannot silently turn network
+    access back on. Pass allow_network=True only from a caller that has
+    told the user Fedora's debuginfod service may be contacted to download
+    debug symbols over the network; that is the only condition under which
+    this function performs network activity.
+
+    cancel_event, if given, is polled once per read cycle; setting it stops
+    the wait loop the same way a timeout does and the debugger process tree
+    is still killed via the existing cleanup path, just with state
+    'cancelled' instead of 'timed_out'.
+    """
     import os
     import selectors
     import signal
@@ -207,7 +268,7 @@ def generate_backtrace(pid: str, executable: str, timestamp: str, *,
                                    "fedora-crash-doctor", "backtraces"))
 
     if not pid.isdecimal() or not timestamp.isdecimal():
-        return {"state": "failed", "error": "Invalid incident identifier"}
+        return {"state": "failed", "error": "Invalid incident identifier", "network_used": False}
     proc = None
     directory_fd = None
     try:
@@ -227,8 +288,19 @@ def generate_backtrace(pid: str, executable: str, timestamp: str, *,
         if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
             raise PermissionError("Backtrace directory must be private and owned by the current user")
         env = os.environ.copy()
-        env["DEBUGINFOD_URLS"] = "https://debuginfod.fedoraproject.org/"
-        debugger_args = '--batch -nx -iex "set auto-load off" -iex "set debuginfod enabled on" -ex "set pagination off" -ex "thread apply all bt full" -ex quit'
+        if allow_network:
+            env["DEBUGINFOD_URLS"] = "https://debuginfod.fedoraproject.org/"
+            debuginfod_setting = "on"
+        else:
+            # Strip any inherited DEBUGINFOD_URLS so ambient environment/config
+            # cannot silently re-enable network access for a local-only request.
+            env.pop("DEBUGINFOD_URLS", None)
+            debuginfod_setting = "off"
+        debugger_args = (
+            '--batch -nx -iex "set auto-load off" '
+            f'-iex "set debuginfod enabled {debuginfod_setting}" '
+            '-ex "set pagination off" -ex "thread apply all bt full" -ex quit'
+        )
         cmd = [sys.executable, os.path.abspath(__file__), "--backtrace-worker",
                "coredumpctl", "debug", pid, f"COREDUMP_EXE={executable}",
                f"--debugger-arguments={debugger_args}"]
@@ -240,13 +312,17 @@ def generate_backtrace(pid: str, executable: str, timestamp: str, *,
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdout, selectors.EVENT_READ)
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    state = "cancelled"
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     state = "timed_out"
                     break
-                if not selector.select(remaining):
-                    state = "timed_out"
-                    break
+                # Poll in short slices so a cancellation is noticed promptly
+                # instead of only after the full remaining deadline.
+                if not selector.select(min(remaining, 0.25)):
+                    continue
                 chunk = os.read(proc.stdout.fileno(), min(65536, output_limit - len(output)))
                 if not chunk:
                     break
@@ -267,9 +343,10 @@ def generate_backtrace(pid: str, executable: str, timestamp: str, *,
         payload = (header + output)[:output_limit]
         with os.fdopen(fd, "wb") as stream:
             stream.write(payload)
-        return {"state": state, "path": os.path.join(output_dir, name), "bytes": len(payload)}
+        return {"state": state, "path": os.path.join(output_dir, name), "bytes": len(payload),
+                "network_used": allow_network}
     except (OSError, ValueError) as exc:
-        return {"state": "failed", "error": str(exc)}
+        return {"state": "failed", "error": str(exc), "network_used": allow_network}
     finally:
         if proc is not None:
             # Kill descendants as well, even when the immediate wrapper has exited.

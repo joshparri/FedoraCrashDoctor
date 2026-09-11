@@ -77,29 +77,42 @@ def test_unrelated_journal_messages_ignored():
     ]
     assert len(parse_systemd_coredump_json(lines, resolve_packages=False)) == 0
 
-def test_deduplication_different_boots():
+def _allow_single_incident_for(monkeypatch, tmp_path, executable_basename):
+    """analyze_app_crashes() no longer has any built-in per-executable
+    threshold override; these dedup tests only care about deduplication, not
+    the generic min-incidents policy, so grant a config override the same
+    way a real user/site config file would."""
+    import app_crash_doctor
+    config_path = tmp_path / "app_crash_profiles.json"
+    config_path.write_text(json.dumps(
+        {"executables": {executable_basename: {"min_incidents": 1}}}
+    ))
+    monkeypatch.setattr(app_crash_doctor, "app_crash_profile_path", lambda: config_path)
+
+def test_deduplication_different_boots(monkeypatch, tmp_path):
     from app_crash_doctor import analyze_app_crashes
     import json
+    _allow_single_incident_for(monkeypatch, tmp_path, "dedup-test-app")
     lines = [
         json.dumps({
             "_BOOT_ID": "boot1",
             "__REALTIME_TIMESTAMP": "1788303225056929",
             "COREDUMP_PID": "1234",
-            "COREDUMP_EXE": "/bin/antigravity",
+            "COREDUMP_EXE": "/bin/dedup-test-app",
             "COREDUMP_SIGNAL": "11"
         }),
         json.dumps({
             "_BOOT_ID": "boot2",
             "__REALTIME_TIMESTAMP": "1788303225056929", # Same timestamp for worst case collision check
             "COREDUMP_PID": "1234",
-            "COREDUMP_EXE": "/bin/antigravity",
+            "COREDUMP_EXE": "/bin/dedup-test-app",
             "COREDUMP_SIGNAL": "11"
         })
     ]
-    
+
     issues = analyze_app_crashes(lines)
     # The two crashes have different boot ids, so they should be treated as separate instances
-    
+
     # We check raw evidence appearances
     assert len(issues) == 1
     issue = issues[0]
@@ -107,29 +120,30 @@ def test_deduplication_different_boots():
     assert "Unique incidents: 2" in evidence
     assert "Raw evidence appearances: 2" in evidence
 
-def test_deduplication_same_boot_same_event():
+def test_deduplication_same_boot_same_event(monkeypatch, tmp_path):
     from app_crash_doctor import analyze_app_crashes
     import json
+    _allow_single_incident_for(monkeypatch, tmp_path, "dedup-test-app")
     lines = [
         json.dumps({
             "_BOOT_ID": "boot1",
             "__REALTIME_TIMESTAMP": "1788303225056929",
             "COREDUMP_PID": "1234",
-            "COREDUMP_EXE": "/bin/antigravity",
+            "COREDUMP_EXE": "/bin/dedup-test-app",
             "COREDUMP_SIGNAL": "11"
         }),
         json.dumps({
             "_BOOT_ID": "boot1",
-            "__REALTIME_TIMESTAMP": "1788303225056929", 
+            "__REALTIME_TIMESTAMP": "1788303225056929",
             "COREDUMP_PID": "1234",
-            "COREDUMP_EXE": "/bin/antigravity",
+            "COREDUMP_EXE": "/bin/dedup-test-app",
             "COREDUMP_SIGNAL": "11"
         })
     ]
-    
+
     issues = analyze_app_crashes(lines)
     # The two crashes have exactly identical unique properties, should dedup to 1
-    
+
     assert len(issues) == 1
     issue = issues[0]
     evidence = str(issue["evidence"])

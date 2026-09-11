@@ -22,8 +22,10 @@ def test_backtrace_command_limits_and_private_output(tmp_path, monkeypatch):
 print(json.dumps({'args': sys.argv[1:], 'url': os.environ['DEBUGINFOD_URLS'],
                   'memory': resource.getrlimit(resource.RLIMIT_AS)[0]}))
 ''')
-    result = generate_backtrace('123', '/usr/bin/example', '100', output_dir=directory)
+    result = generate_backtrace('123', '/usr/bin/example', '100', output_dir=directory,
+                                 allow_network=True)
     assert result['state'] == 'completed'
+    assert result['network_used'] is True
     import json
     output = json.loads(Path(result['path']).read_text().split('\n', 1)[1])
     assert output['args'][:3] == ['debug', '123', 'COREDUMP_EXE=/usr/bin/example']
@@ -32,6 +34,25 @@ print(json.dumps({'args': sys.argv[1:], 'url': os.environ['DEBUGINFOD_URLS'],
     assert output['memory'] == 1024 ** 3
     assert output['url'] == 'https://debuginfod.fedoraproject.org/'
     assert stat.S_IMODE(Path(result['path']).stat().st_mode) == 0o600
+
+
+def test_default_is_no_network_and_strips_inherited_debuginfod_url(tmp_path, monkeypatch):
+    """allow_network defaults to False: debuginfod must be explicitly disabled
+    and DEBUGINFOD_URLS must never reach the debugger, even if it is already
+    set in the calling process's own environment (ambient config must not be
+    able to silently re-enable network access)."""
+    directory = fake_debugger(tmp_path, monkeypatch, '''import sys, os, json
+print(json.dumps({'args': sys.argv[1:], 'url_present': 'DEBUGINFOD_URLS' in os.environ}))
+''')
+    monkeypatch.setenv('DEBUGINFOD_URLS', 'https://example.invalid/should-not-be-used')
+    result = generate_backtrace('123', '/usr/bin/example', '100', output_dir=directory)
+    assert result['state'] == 'completed'
+    assert result['network_used'] is False
+    import json
+    output = json.loads(Path(result['path']).read_text().split('\n', 1)[1])
+    assert 'set debuginfod enabled off' in output['args'][3]
+    assert 'set debuginfod enabled on' not in output['args'][3]
+    assert output['url_present'] is False
 
 
 def test_chatty_process_has_absolute_deadline(tmp_path, monkeypatch):
@@ -85,7 +106,7 @@ def test_timeout_kills_descendants(tmp_path, monkeypatch):
         status = Path(f'/proc/{child}/stat')
         try:
             state = status.read_text().split()[2]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             break  # The kernel reaped the child between observations.
         if state == 'Z':
             break
@@ -94,19 +115,25 @@ def test_timeout_kills_descendants(tmp_path, monkeypatch):
         raise AssertionError('Debugger descendant remains running')
 
 
-def test_async_result_is_reported(monkeypatch):
+def test_analyze_app_crashes_never_starts_a_thread_or_process(monkeypatch):
+    """analyze_app_crashes() is pure log parsing: it must never itself launch
+    GDB, touch the network, or spawn a thread/process as a side effect --
+    that is exclusively symbolic_analysis.start_symbolic_analysis()'s job."""
     import app_crash_doctor
     import threading
-    threads = []
-    real_thread = threading.Thread
-    def record_thread(*args, **kwargs):
-        thread = real_thread(*args, **kwargs)
-        threads.append(thread)
-        return thread
-    monkeypatch.setattr(threading, 'Thread', record_thread)
-    monkeypatch.setattr(app_crash_doctor, 'generate_backtrace', lambda *args: {'state': 'completed', 'path': '/private/trace.txt'})
+    import subprocess
+
+    def fail_thread(*args, **kwargs):
+        raise AssertionError('analyze_app_crashes() must not spawn threads')
+
+    def fail_popen(*args, **kwargs):
+        raise AssertionError('analyze_app_crashes() must not spawn processes')
+
+    monkeypatch.setattr(threading, 'Thread', fail_thread)
+    monkeypatch.setattr(subprocess, 'Popen', fail_popen)
     lines = [f'Thu 2026-09-10 10:32:0{i} AEST {i+1} 1002 1002 SIGABRT present /bin/probe 19K' for i in range(3)]
     issues = app_crash_doctor.analyze_app_crashes(lines)
-    for thread in threads:
-        thread.join(timeout=2)
-    assert issues[0]['backtrace'] == {'state': 'completed', 'path': '/private/trace.txt'}
+    assert issues[0]['backtrace']['state'] == 'not_requested'
+    assert issues[0]['backtrace']['request'] == {
+        'pid': '3', 'executable': '/bin/probe', 'timestamp': issues[0]['backtrace']['request']['timestamp'],
+    }
